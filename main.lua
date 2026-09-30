@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - RUTA UNIVERSAL (PIE / AUTO), CICLO REAL Y AUTO-EAT
+-- MAP PATROL HUB - RUTA CONTINUA (PIE / AUTO) CON RETORNO A LOS 15s
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -19,31 +19,25 @@ end
 
 local Config = {
     PatrolRunning = false,
-    WaypointWait = 0,             -- Segundos de parada por punto (por defecto 0)
+    WaypointWait = 0,             -- Segundos de parada por punto (0 = continuo)
     AutoRecord = false,
-    StepDist = 30,                -- Distancia entre bolitas automáticas
+    StepDist = 30,
     ShowMarkers = true,
 
-    -- Velocidad y Movimiento
-    CarSpeed = 75,                -- Velocidad de empuje si vas en auto
-    WaypointTolerance = 5.5,      -- Distancia para considerar alcanzado el punto
+    -- Vehículo y Movimiento
+    CarSpeed = 80,
 
     -- Detección Día / Noche
-    IgnoreDayNight = false,       -- Si está activo, recorre las 24 horas sin volver
-    ReturnEarlySeconds = 30,      -- Segundos antes de anochecer para regresar a base
-
-    -- Auto-Eat
-    AutoEatEnabled = true,
-    EatDurationAtBase = 4,
-    HungerThreshold = 75
+    IgnoreDayNight = false,
+    ReturnEarlySeconds = 15       -- 15 segundos antes de la noche regresa a base
 }
 
 local Waypoints = {}
 local MarkerInstances = {}
 local LastRecordPos = nil
 local CurrentWaypointIndex = 1
-local IsDaytimeGlobal = true
-local SecondsUntilNight = 999
+local PatrolThread = nil
+local WaypointTimeoutTick = 0
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
@@ -60,11 +54,9 @@ local Tabs = {
     Main = Window:AddTab({ Title = "Patrullaje", Icon = "play" }),
     Recorder = Window:AddTab({ Title = "Grabador", Icon = "map-pin" }),
     Port = Window:AddTab({ Title = "Import/Export", Icon = "clipboard" }),
-    Survival = Window:AddTab({ Title = "Base & Comida", Icon = "coffee" }),
     Settings = Window:AddTab({ Title = "Ajustes", Icon = "settings" })
 }
 
--- PÁRRAFOS DE ESTADO
 local StatusParagraph = Tabs.Main:AddParagraph({
     Title = "Estado del Patrullaje",
     Content = "Inactivo. Carga tu ruta y presiona Iniciar."
@@ -100,30 +92,24 @@ local function getCurrentVehicle()
     return nil, nil
 end
 
--- DETECTOR AVANZADO DEL CICLO DÍA / NOCHE (LEE LA PANTALLA Y EL RELOJ)
+-- DETECTOR DEL TIEMPO Y CRONÓMETRO DE PANTALLA
 local function scanGameDayNight()
     if Config.IgnoreDayNight then
-        IsDaytimeGlobal = true
-        SecondsUntilNight = 999
         return true, 999
     end
 
     local detectedDay = true
     local remainingSecs = 999
 
-    -- 1. Buscar en la interfaz de pantalla (PlayerGui) por texto de tiempo y estado
     local pGui = lp:FindFirstChild("PlayerGui")
     if pGui then
         for _, lbl in ipairs(pGui:GetDescendants()) do
             if lbl:IsA("TextLabel") and lbl.Visible then
                 local txt = lbl.Text:lower()
-                
-                -- Detectar si dice explícitamente Noche
                 if txt:find("noche") or txt:find("night") then
                     detectedDay = false
                 end
 
-                -- Detectar cronómetro mm:ss (ej: 03:45 o 00:25)
                 local m, s = txt:match("(%d+):(%d+)")
                 if m and s then
                     local total = (tonumber(m) * 60) + tonumber(s)
@@ -135,18 +121,15 @@ local function scanGameDayNight()
         end
     end
 
-    -- 2. Verificación secundaria con la luz del mapa (Lighting)
     local clock = Lighting.ClockTime
     if clock < 5.8 or clock > 18.2 then
         detectedDay = false
     end
 
-    IsDaytimeGlobal = detectedDay
-    SecondsUntilNight = remainingSecs
     return detectedDay, remainingSecs
 end
 
--- MONITOR DE ESTADO EN PANTALLA
+-- MONITOR DE PANTALLA
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -163,129 +146,7 @@ task.spawn(function()
     end
 end)
 
--- SISTEMA DE MOVIMIENTO UNIVERSAL (PIE Y AUTO CON ANTI-ATASCO)
-local function navigateToPosition(targetPos, timeoutSecs)
-    local timeout = tick() + (timeoutSecs or 20)
-    local lastPos = nil
-    local stuckFrames = 0
-
-    while Config.PatrolRunning and tick() < timeout do
-        RunService.Heartbeat:Wait()
-
-        local root = getRootPart()
-        local hum = getHumanoid()
-        local car, seat = getCurrentVehicle()
-
-        if not root or not hum or hum.Health <= 0 then return false end
-
-        -- Distancia horizontal
-        local myPos = (car and seat) and seat.Position or root.Position
-        local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-        local dist = delta.Magnitude
-
-        if dist <= Config.WaypointTolerance then
-            if seat then
-                seat.Throttle = 0
-                seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
-            end
-            return true
-        end
-
-        -- Detección de atascos (salto o impulso si no avanza)
-        if lastPos and (myPos - lastPos).Magnitude < 0.2 then
-            stuckFrames = stuckFrames + 1
-            if stuckFrames >= 30 then
-                if not car then
-                    hum.Jump = true
-                else
-                    seat.AssemblyLinearVelocity = seat.AssemblyLinearVelocity + Vector3.new(0, 15, 0)
-                end
-                stuckFrames = 0
-            end
-        else
-            stuckFrames = 0
-            lastPos = myPos
-        end
-
-        -- A) MOVIMIENTO EN AUTO
-        if car and seat then
-            seat.Throttle = 1
-            -- Orientar suavemente hacia el punto
-            car:PivotTo(CFrame.new(myPos, Vector3.new(targetPos.X, myPos.Y, targetPos.Z)))
-            local driveVel = delta.Unit * Config.CarSpeed
-            seat.AssemblyLinearVelocity = Vector3.new(driveVel.X, seat.AssemblyLinearVelocity.Y, driveVel.Z)
-        
-        -- B) MOVIMIENTO A PIE
-        else
-            hum:MoveTo(targetPos)
-        end
-    end
-
-    return false
-end
-
--- LECTURA DE HAMBRE DEL PERSONAJE
-local function getPlayerHunger()
-    local char = lp.Character
-    if not char then return 100 end
-
-    local val = char:FindFirstChild("Hunger") or char:FindFirstChild("Hambre")
-    if val and (val:IsA("NumberValue") or val:IsA("IntValue")) then
-        return val.Value
-    end
-
-    local pGui = lp:FindFirstChild("PlayerGui")
-    if pGui then
-        for _, obj in ipairs(pGui:GetDescendants()) do
-            if obj:IsA("TextLabel") and (obj.Name:lower():find("hunger") or obj.Name:lower():find("hambre")) then
-                local num = tonumber(obj.Text:match("%d+"))
-                if num then return num end
-            end
-        end
-    end
-    return 50
-end
-
--- AUTO-EAT EN EL PUNTO 1
-local function performBaseEating()
-    if not Config.AutoEatEnabled then return end
-    updateStatus("Base: Comiendo...")
-
-    local start = tick()
-    while tick() - start < Config.EatDurationAtBase do
-        task.wait(0.2)
-        if getPlayerHunger() >= Config.HungerThreshold then break end
-
-        local root = getRootPart()
-        if root then
-            for _, prompt in ipairs(workspace:GetDescendants()) do
-                if prompt:IsA("ProximityPrompt") then
-                    local pText = (prompt.ObjectText .. " " .. prompt.ActionText):lower()
-                    if pText:find("com") or pText:find("eat") or pText:find("food") or pText:find("manzana") then
-                        local pPart = prompt.Parent
-                        if pPart and pPart:IsA("BasePart") and (pPart.Position - root.Position).Magnitude <= 15 then
-                            prompt.HoldDuration = 0
-                            fireproximityprompt(prompt)
-                        end
-                    end
-                end
-            end
-        end
-
-        local backpack = lp:FindFirstChild("Backpack")
-        local char = lp.Character
-        local tool = (char and char:FindFirstChildWhichIsA("Tool")) or (backpack and backpack:FindFirstChildWhichIsA("Tool"))
-        if tool and (tool.Name:lower():find("food") or tool.Name:lower():find("comida") or tool.Name:lower():find("manzana")) then
-            if tool.Parent == backpack and char then
-                local hum = getHumanoid()
-                if hum then hum:EquipTool(tool) end
-            end
-            pcall(function() tool:Activate() end)
-        end
-    end
-end
-
--- CREACIÓN OPTIMIZADA DE BOLITAS (0 LAG PARA 500+ PUNTOS)
+-- CREACIÓN OPTIMIZADA DE BOLITAS (0 LAG)
 local function createMarker(pos, index)
     local marker = Instance.new("Part")
     marker.Name = "RouteNode_" .. index
@@ -313,31 +174,145 @@ local function redrawAllMarkers()
     end
 end
 
+-- DETENER PATRULLAJE
+local function stopPatrol()
+    Config.PatrolRunning = false
+    if PatrolThread then
+        task.cancel(PatrolThread)
+        PatrolThread = nil
+    end
+
+    local hum = getHumanoid()
+    local root = getRootPart()
+    if hum and root then hum:MoveTo(root.Position) end
+
+    local _, seat = getCurrentVehicle()
+    if seat then
+        seat.Throttle = 0
+        seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
+    end
+    updateStatus("Patrullaje detenido.")
+end
+
+-- INICIAR PATRULLAJE CONTINUO
+local function startPatrol()
+    if #Waypoints < 2 then
+        Fluent:Notify({ Title = "Ruta Vacía", Content = "Carga tu JSON de puntos primero.", Duration = 3 })
+        return
+    end
+
+    stopPatrol()
+    Config.PatrolRunning = true
+    CurrentWaypointIndex = (CurrentWaypointIndex > #Waypoints) and 1 or CurrentWaypointIndex
+    WaypointTimeoutTick = tick() + 12
+
+    PatrolThread = task.spawn(function()
+        while Config.PatrolRunning do
+            RunService.Heartbeat:Wait()
+
+            pcall(function()
+                local isDay, secsLeft = scanGameDayNight()
+                local basePos = Waypoints[1]
+                local root = getRootPart()
+                local hum = getHumanoid()
+                local car, seat = getCurrentVehicle()
+
+                if not root or not hum or hum.Health <= 0 then return end
+
+                local myPos = (car and seat) and seat.Position or root.Position
+                local shouldReturnHome = (not isDay) or (secsLeft <= Config.ReturnEarlySeconds)
+
+                -- CASO NOCHE / RETORNO PREVENTIVO A LOS 15s
+                if shouldReturnHome and not Config.IgnoreDayNight then
+                    local deltaHome = Vector3.new(basePos.X - myPos.X, 0, basePos.Z - myPos.Z)
+                    local distHome = deltaHome.Magnitude
+                    local baseRadius = car and 12 or 6
+
+                    if distHome <= baseRadius then
+                        updateStatus("🌙 Resguardado en Base (Punto 1). Esperando día...")
+                        if seat then
+                            seat.Throttle = 0
+                            seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
+                        else
+                            hum:MoveTo(basePos)
+                        end
+                    else
+                        updateStatus(string.format("⚠️ Anocheciendo (%ds): Volviendo a Base...", secsLeft))
+                        if car and seat then
+                            seat.Throttle = 1
+                            if deltaHome.Magnitude > 2 then
+                                pcall(function()
+                                    car:PivotTo(CFrame.new(myPos, Vector3.new(basePos.X, myPos.Y, basePos.Z)))
+                                end)
+                            end
+                            local dir = deltaHome.Unit
+                            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
+                        else
+                            hum:MoveTo(basePos)
+                        end
+                    end
+
+                -- CASO DÍA: RECORRIDO CONTINUO EN BUCLE
+                else
+                    if CurrentWaypointIndex < 1 or CurrentWaypointIndex > #Waypoints then
+                        CurrentWaypointIndex = 1
+                    end
+
+                    local target = Waypoints[CurrentWaypointIndex]
+                    if target then
+                        updateStatus(string.format("Patrullando: Punto [%d / %d]", CurrentWaypointIndex, #Waypoints))
+
+                        local delta = Vector3.new(target.X - myPos.X, 0, target.Z - myPos.Z)
+                        local dist = delta.Magnitude
+                        local tolerance = car and 9.5 or 5.0
+
+                        -- PUNTO ALCANZADO O TIEMPO LÍMITE (PASA AL SIGUIENTE AL INSTANTE)
+                        if dist <= tolerance or tick() > WaypointTimeoutTick then
+                            if Config.WaypointWait > 0 and dist <= tolerance then
+                                task.wait(Config.WaypointWait)
+                            end
+
+                            CurrentWaypointIndex = CurrentWaypointIndex + 1
+                            if CurrentWaypointIndex > #Waypoints then
+                                CurrentWaypointIndex = 1
+                            end
+                            WaypointTimeoutTick = tick() + 12
+                        else
+                            -- CONDUCIR O CAMINAR HACIA EL PUNTO
+                            if car and seat then
+                                seat.Throttle = 1
+                                if delta.Magnitude > 2 then
+                                    pcall(function()
+                                        car:PivotTo(CFrame.new(myPos, Vector3.new(target.X, myPos.Y, target.Z)))
+                                    end)
+                                end
+                                local dir = delta.Unit
+                                seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
+                            else
+                                hum:MoveTo(target)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
 -- PESTAÑA 1: PATRULLAJE
 Tabs.Main:AddSection("Control de Ruta")
 
 Tabs.Main:AddButton({
     Title = "▶ INICIAR PATRULLAJE",
     Callback = function()
-        if #Waypoints < 2 then
-            Fluent:Notify({ Title = "Ruta Vacía", Content = "Importa o graba puntos primero.", Duration = 3 })
-            return
-        end
-        Config.PatrolRunning = true
-        updateStatus("Iniciado. Evaluando condiciones...")
+        startPatrol()
     end
 })
 
 Tabs.Main:AddButton({
     Title = "⏹ DETENER PATRULLAJE",
     Callback = function()
-        Config.PatrolRunning = false
-        local hum = getHumanoid()
-        local root = getRootPart()
-        if hum and root then hum:MoveTo(root.Position) end
-        local _, seat = getCurrentVehicle()
-        if seat then seat.Throttle = 0 end
-        updateStatus("Detenido manualmente.")
+        stopPatrol()
     end
 })
 
@@ -352,7 +327,7 @@ Tabs.Main:AddSlider("WaitTimeSlider", {
 
 Tabs.Main:AddToggle("IgnoreDayNightToggle", {
     Title = "Forzar Modo Día (Ignorar Noche)",
-    Description = "Actívalo si no quieres que regrese a la base y recorra las 24 horas",
+    Description = "Actívalo si quieres que recorra el mapa sin volver a base",
     Default = false,
     Callback = function(Value) Config.IgnoreDayNight = Value end
 })
@@ -469,42 +444,23 @@ Tabs.Port:AddButton({
     end
 })
 
--- PESTAÑA 4: BASE & COMIDA
-Tabs.Survival:AddSection("Auto-Alimentación en Base (Punto 1)")
-
-Tabs.Survival:AddToggle("AutoEatToggle", {
-    Title = "Activar Auto-Eat al Salir de Base",
-    Default = true,
-    Callback = function(Value) Config.AutoEatEnabled = Value end
-})
-
-Tabs.Survival:AddSlider("EatTimeSlider", {
-    Title = "Segundos comiendo en Base",
-    Default = 4,
-    Min = 2,
-    Max = 12,
-    Rounding = 0,
-    Callback = function(Value) Config.EatDurationAtBase = Value end
-})
-
--- PESTAÑA 5: AJUSTES
+-- PESTAÑA 4: AJUSTES
 Tabs.Settings:AddSection("Retiro Preventivo y Vehículo")
 
 Tabs.Settings:AddSlider("ReturnEarlySlider", {
     Title = "Segundos de anticipación antes de noche",
-    Description = "Tiempo antes de anochecer para abortar y volver a base",
-    Default = 30,
-    Min = 10,
-    Max = 60,
+    Default = 15,
+    Min = 5,
+    Max = 45,
     Rounding = 0,
     Callback = function(Value) Config.ReturnEarlySeconds = Value end
 })
 
 Tabs.Settings:AddSlider("CarSpeedSlider", {
     Title = "Fuerza de empuje del auto",
-    Default = 75,
+    Default = 80,
     Min = 30,
-    Max = 140,
+    Max = 150,
     Rounding = 0,
     Callback = function(Value) Config.CarSpeed = Value end
 })
@@ -557,64 +513,9 @@ task.spawn(function()
     end
 end)
 
--- BUCLE MAESTRO DE PATRULLAJE
-task.spawn(function()
-    while true do
-        task.wait(0.15)
-
-        if Config.PatrolRunning and #Waypoints >= 2 then
-            local isDay, secsLeft = scanGameDayNight()
-            local basePos = Waypoints[1]
-            local root = getRootPart()
-
-            if root then
-                -- ¿Debe retirarse a la base? (Es de noche o faltan pocos segundos para anochecer)
-                local shouldBeAtBase = (not isDay) or (secsLeft <= Config.ReturnEarlySeconds)
-
-                if shouldBeAtBase and not Config.IgnoreDayNight then
-                    local distToBase = (root.Position - basePos).Magnitude
-                    if distToBase > Config.WaypointTolerance then
-                        updateStatus(string.format("⚠️ Anocheciendo (%ds restantes): Volviendo a Base...", secsLeft))
-                        navigateToPosition(basePos, 30)
-                    else
-                        updateStatus("🌙 Resguardado en Base (Punto 1). Esperando amanecer...")
-                        performBaseEating()
-                        task.wait(2)
-                    end
-                else
-                    -- ES DE DÍA: Recorrer ruta secuencial
-                    if CurrentWaypointIndex == 1 then
-                        local distToBase = (root.Position - basePos).Magnitude
-                        if distToBase <= Config.WaypointTolerance + 4 then
-                            performBaseEating()
-                        end
-                        CurrentWaypointIndex = 2
-                    end
-
-                    local target = Waypoints[CurrentWaypointIndex]
-                    if target then
-                        updateStatus(string.format("Patrullando: Punto [%d / %d]", CurrentWaypointIndex, #Waypoints))
-                        local reached = navigateToPosition(target, 20)
-
-                        if reached then
-                            if Config.WaypointWait > 0 then
-                                task.wait(Config.WaypointWait)
-                            end
-                            CurrentWaypointIndex = CurrentWaypointIndex + 1
-                            if CurrentWaypointIndex > #Waypoints then
-                                CurrentWaypointIndex = 1
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-end)
-
 Fluent:Notify({
     Title = "MAP PATROL HUB LISTO",
-    Content = "Motor universal para auto/a pie y detector de pantalla activos.",
+    Content = "Ruta continua y retorno a los 15s activos.",
     Duration = 4
 })
 
