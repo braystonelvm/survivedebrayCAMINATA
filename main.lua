@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - RUTA CONTINUA (PIE / AUTO) CON RETORNO A LOS 15s
+-- MAP PATROL HUB - RUTA CONTINUA CON REINTENTOS (3 VECES) Y SALTO DE PUNTOS
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -19,32 +19,25 @@ end
 
 local Config = {
     PatrolRunning = false,
-    WaypointWait = 0,             -- Segundos de parada por punto (0 = continuo)
     AutoRecord = false,
     StepDist = 30,
     ShowMarkers = true,
-
-    -- Vehículo y Movimiento
     CarSpeed = 80,
-
-    -- Detección Día / Noche
     IgnoreDayNight = false,
-    ReturnEarlySeconds = 15       -- 15 segundos antes de la noche regresa a base
+    ReturnEarlySeconds = 15
 }
 
 local Waypoints = {}
 local MarkerInstances = {}
 local LastRecordPos = nil
-local CurrentWaypointIndex = 1
 local PatrolThread = nil
-local WaypointTimeoutTick = 0
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
     Title = "MAP PATROL HUB | 500+ NODOS",
     SubTitle = "Sobrevive al Apocalipsis",
     TabWidth = 160,
-    Size = UDim2.fromOffset(590, 520),
+    Size = UDim2.fromOffset(590, 500),
     Acrylic = true,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -63,8 +56,8 @@ local StatusParagraph = Tabs.Main:AddParagraph({
 })
 
 local CycleParagraph = Tabs.Main:AddParagraph({
-    Title = "Ciclo Detectado en Vivo",
-    Content = "Analizando pantalla..."
+    Title = "Ciclo Detectado",
+    Content = "Analizando hora..."
 })
 
 local function updateStatus(text)
@@ -92,7 +85,7 @@ local function getCurrentVehicle()
     return nil, nil
 end
 
--- DETECTOR DEL TIEMPO Y CRONÓMETRO DE PANTALLA
+-- DETECTOR DE DÍA / NOCHE
 local function scanGameDayNight()
     if Config.IgnoreDayNight then
         return true, 999
@@ -109,13 +102,9 @@ local function scanGameDayNight()
                 if txt:find("noche") or txt:find("night") then
                     detectedDay = false
                 end
-
                 local m, s = txt:match("(%d+):(%d+)")
-                if m and s then
-                    local total = (tonumber(m) * 60) + tonumber(s)
-                    if not txt:find("revivir") and not txt:find("espera") then
-                        remainingSecs = total
-                    end
+                if m and s and not txt:find("revivir") and not txt:find("espera") then
+                    remainingSecs = (tonumber(m) * 60) + tonumber(s)
                 end
             end
         end
@@ -129,7 +118,6 @@ local function scanGameDayNight()
     return detectedDay, remainingSecs
 end
 
--- MONITOR DE PANTALLA
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -138,7 +126,7 @@ task.spawn(function()
         local modeText = car and "🚗 EN VEHÍCULO" or "🏃 A PIE"
 
         if Config.IgnoreDayNight then
-            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: ☀️ DÍA FORZADO (24h Activo)", modeText))
+            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: ☀️ DÍA FORZADO (24h)", modeText))
         else
             local timeInfo = (secs < 900) and string.format(" (Quedan: %ds)", secs) or ""
             CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: %s%s", modeText, isDay and "☀️ DÍA" or "🌙 NOCHE", timeInfo))
@@ -146,7 +134,60 @@ task.spawn(function()
     end
 end)
 
--- CREACIÓN OPTIMIZADA DE BOLITAS (0 LAG)
+-- MOVIMIENTO HACIA UN PUNTO INDIVIDUAL
+local function walkOrDriveTo(targetPos, maxTime)
+    local startT = tick()
+    local reached = false
+
+    while Config.PatrolRunning and (tick() - startT < maxTime) do
+        local root = getRootPart()
+        local hum = getHumanoid()
+        local car, seat = getCurrentVehicle()
+
+        if not root or not hum or hum.Health <= 0 then break end
+
+        local myPos = (car and seat) and seat.Position or root.Position
+        local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+        local dist = delta.Magnitude
+
+        local tolerance = (car and seat) and 9.5 or 5.0
+        if dist <= tolerance then
+            reached = true
+            break
+        end
+
+        if car and seat then
+            seat.Throttle = 1
+            if delta.Magnitude > 2 then
+                pcall(function()
+                    car:PivotTo(CFrame.new(myPos, Vector3.new(targetPos.X, myPos.Y, targetPos.Z)))
+                end)
+            end
+            local dir = delta.Unit
+            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
+        else
+            hum:MoveTo(targetPos)
+        end
+
+        task.wait(0.1)
+    end
+
+    return reached
+end
+
+-- INTENTAR HASTA 3 VECES, SI FALLA SE OMITE
+local function moveToPointWithRetry(targetPos)
+    for attempt = 1, 3 do
+        if not Config.PatrolRunning then return false end
+        local success = walkOrDriveTo(targetPos, 4) -- 4 segundos por intento
+        if success then
+            return true
+        end
+    end
+    return false -- Si falló los 3 intentos, lo salta
+end
+
+-- CREACIÓN DE MARCADORES (0 LAG)
 local function createMarker(pos, index)
     local marker = Instance.new("Part")
     marker.Name = "RouteNode_" .. index
@@ -174,7 +215,7 @@ local function redrawAllMarkers()
     end
 end
 
--- DETENER PATRULLAJE
+-- DETENER TODO EN SECO
 local function stopPatrol()
     Config.PatrolRunning = false
     if PatrolThread then
@@ -189,112 +230,70 @@ local function stopPatrol()
     local _, seat = getCurrentVehicle()
     if seat then
         seat.Throttle = 0
-        seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
+        seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end
-    updateStatus("Patrullaje detenido.")
+
+    updateStatus("Patrullaje cancelado y detenido por completo.")
 end
 
--- INICIAR PATRULLAJE CONTINUO
+-- INICIAR: VA AL PUNTO 1, ESPERA 5s Y RECORRE TODOS LOS PUNTOS
 local function startPatrol()
     if #Waypoints < 2 then
-        Fluent:Notify({ Title = "Ruta Vacía", Content = "Carga tu JSON de puntos primero.", Duration = 3 })
+        Fluent:Notify({ Title = "Sin Puntos", Content = "Carga o graba puntos primero.", Duration = 3 })
         return
     end
 
     stopPatrol()
     Config.PatrolRunning = true
-    CurrentWaypointIndex = (CurrentWaypointIndex > #Waypoints) and 1 or CurrentWaypointIndex
-    WaypointTimeoutTick = tick() + 12
 
     PatrolThread = task.spawn(function()
+        -- 1. Ir al Punto 1 (Base)
+        updateStatus("Iniciando: Yendo al Punto 1...")
+        moveToPointWithRetry(Waypoints[1])
+
+        if not Config.PatrolRunning then return end
+
+        -- 2. Esperar 5 segundos en el Punto 1
+        for s = 5, 1, -1 do
+            if not Config.PatrolRunning then return end
+            updateStatus(string.format("En Punto 1: Esperando %d segundos...", s))
+            task.wait(1)
+        end
+
+        -- 3. Recorrer todos los demás puntos continuamente
         while Config.PatrolRunning do
-            RunService.Heartbeat:Wait()
+            for i = 2, #Waypoints do
+                if not Config.PatrolRunning then break end
 
-            pcall(function()
+                -- Chequeo de Noche (15s antes de anochecer vuelve a Punto 1)
                 local isDay, secsLeft = scanGameDayNight()
-                local basePos = Waypoints[1]
-                local root = getRootPart()
-                local hum = getHumanoid()
-                local car, seat = getCurrentVehicle()
+                if (not isDay or secsLeft <= Config.ReturnEarlySeconds) and not Config.IgnoreDayNight then
+                    updateStatus(string.format("⚠️ Anocheciendo (%ds): Volviendo a Punto 1...", secsLeft))
+                    moveToPointWithRetry(Waypoints[1])
 
-                if not root or not hum or hum.Health <= 0 then return end
-
-                local myPos = (car and seat) and seat.Position or root.Position
-                local shouldReturnHome = (not isDay) or (secsLeft <= Config.ReturnEarlySeconds)
-
-                -- CASO NOCHE / RETORNO PREVENTIVO A LOS 15s
-                if shouldReturnHome and not Config.IgnoreDayNight then
-                    local deltaHome = Vector3.new(basePos.X - myPos.X, 0, basePos.Z - myPos.Z)
-                    local distHome = deltaHome.Magnitude
-                    local baseRadius = car and 12 or 6
-
-                    if distHome <= baseRadius then
-                        updateStatus("🌙 Resguardado en Base (Punto 1). Esperando día...")
-                        if seat then
-                            seat.Throttle = 0
-                            seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
-                        else
-                            hum:MoveTo(basePos)
-                        end
-                    else
-                        updateStatus(string.format("⚠️ Anocheciendo (%ds): Volviendo a Base...", secsLeft))
-                        if car and seat then
-                            seat.Throttle = 1
-                            if deltaHome.Magnitude > 2 then
-                                pcall(function()
-                                    car:PivotTo(CFrame.new(myPos, Vector3.new(basePos.X, myPos.Y, basePos.Z)))
-                                end)
-                            end
-                            local dir = deltaHome.Unit
-                            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
-                        else
-                            hum:MoveTo(basePos)
-                        end
+                    while Config.PatrolRunning do
+                        local d, s = scanGameDayNight()
+                        if d and s > Config.ReturnEarlySeconds then break end
+                        updateStatus("🌙 Esperando amanecer en Punto 1...")
+                        task.wait(2)
                     end
 
-                -- CASO DÍA: RECORRIDO CONTINUO EN BUCLE
-                else
-                    if CurrentWaypointIndex < 1 or CurrentWaypointIndex > #Waypoints then
-                        CurrentWaypointIndex = 1
-                    end
-
-                    local target = Waypoints[CurrentWaypointIndex]
-                    if target then
-                        updateStatus(string.format("Patrullando: Punto [%d / %d]", CurrentWaypointIndex, #Waypoints))
-
-                        local delta = Vector3.new(target.X - myPos.X, 0, target.Z - myPos.Z)
-                        local dist = delta.Magnitude
-                        local tolerance = car and 9.5 or 5.0
-
-                        -- PUNTO ALCANZADO O TIEMPO LÍMITE (PASA AL SIGUIENTE AL INSTANTE)
-                        if dist <= tolerance or tick() > WaypointTimeoutTick then
-                            if Config.WaypointWait > 0 and dist <= tolerance then
-                                task.wait(Config.WaypointWait)
-                            end
-
-                            CurrentWaypointIndex = CurrentWaypointIndex + 1
-                            if CurrentWaypointIndex > #Waypoints then
-                                CurrentWaypointIndex = 1
-                            end
-                            WaypointTimeoutTick = tick() + 12
-                        else
-                            -- CONDUCIR O CAMINAR HACIA EL PUNTO
-                            if car and seat then
-                                seat.Throttle = 1
-                                if delta.Magnitude > 2 then
-                                    pcall(function()
-                                        car:PivotTo(CFrame.new(myPos, Vector3.new(target.X, myPos.Y, target.Z)))
-                                    end)
-                                end
-                                local dir = delta.Unit
-                                seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
-                            else
-                                hum:MoveTo(target)
-                            end
-                        end
-                    end
+                    updateStatus("Amaneció. Esperando 5s para reiniciar...")
+                    task.wait(5)
+                    break
                 end
-            end)
+
+                -- Avanzar al siguiente punto
+                updateStatus(string.format("Caminando: Punto [%d / %d]", i, #Waypoints))
+                moveToPointWithRetry(Waypoints[i])
+            end
+
+            -- Si terminó toda la ruta, regresa a Punto 1 y repite el ciclo
+            if Config.PatrolRunning then
+                updateStatus("Fin de ruta. Regresando a Punto 1...")
+                moveToPointWithRetry(Waypoints[1])
+                task.wait(1)
+            end
         end
     end)
 end
@@ -304,6 +303,7 @@ Tabs.Main:AddSection("Control de Ruta")
 
 Tabs.Main:AddButton({
     Title = "▶ INICIAR PATRULLAJE",
+    Description = "Va a Punto 1, espera 5s y recorre todos los puntos sin frenar",
     Callback = function()
         startPatrol()
     end
@@ -311,23 +311,15 @@ Tabs.Main:AddButton({
 
 Tabs.Main:AddButton({
     Title = "⏹ DETENER PATRULLAJE",
+    Description = "Cancela todo y frena al muñeco de inmediato",
     Callback = function()
         stopPatrol()
     end
 })
 
-Tabs.Main:AddSlider("WaitTimeSlider", {
-    Title = "Espera en cada punto (Seg)",
-    Default = 0,
-    Min = 0,
-    Max = 8,
-    Rounding = 1,
-    Callback = function(Value) Config.WaypointWait = Value end
-})
-
 Tabs.Main:AddToggle("IgnoreDayNightToggle", {
     Title = "Forzar Modo Día (Ignorar Noche)",
-    Description = "Actívalo si quieres que recorra el mapa sin volver a base",
+    Description = "Recorre sin volver a base las 24 horas",
     Default = false,
     Callback = function(Value) Config.IgnoreDayNight = Value end
 })
@@ -372,7 +364,6 @@ Tabs.Recorder:AddButton({
         MarkersFolder:ClearAllChildren()
         table.clear(MarkerInstances)
         LastRecordPos = nil
-        CurrentWaypointIndex = 1
         Fluent:Notify({ Title = "Ruta Borrada", Content = "Puntos eliminados.", Duration = 2 })
     end
 })
@@ -436,7 +427,6 @@ Tabs.Port:AddButton({
                 table.insert(Waypoints, Vector3.new(pt[1], pt[2], pt[3]))
             end
             redrawAllMarkers()
-            CurrentWaypointIndex = 1
             Fluent:Notify({ Title = "Ruta Cargada", Content = string.format("Cargados %d puntos.", #Waypoints), Duration = 4 })
         else
             Fluent:Notify({ Title = "Error", Content = "Formato de texto inválido.", Duration = 3 })
@@ -445,16 +435,7 @@ Tabs.Port:AddButton({
 })
 
 -- PESTAÑA 4: AJUSTES
-Tabs.Settings:AddSection("Retiro Preventivo y Vehículo")
-
-Tabs.Settings:AddSlider("ReturnEarlySlider", {
-    Title = "Segundos de anticipación antes de noche",
-    Default = 15,
-    Min = 5,
-    Max = 45,
-    Rounding = 0,
-    Callback = function(Value) Config.ReturnEarlySeconds = Value end
-})
+Tabs.Settings:AddSection("Vehículo")
 
 Tabs.Settings:AddSlider("CarSpeedSlider", {
     Title = "Fuerza de empuje del auto",
@@ -515,7 +496,7 @@ end)
 
 Fluent:Notify({
     Title = "MAP PATROL HUB LISTO",
-    Content = "Ruta continua y retorno a los 15s activos.",
+    Content = "Sistema de 3 intentos y flujo continuo activo.",
     Duration = 4
 })
 
