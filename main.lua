@@ -1,5 +1,5 @@
 -- ==============================================================================
--- PATROL & SURVIVAL HUB - RUTA AMARILLA DÍA/NOCHE, AUTO-EAT Y EXPORTADOR
+-- MAP PATROL HUB - RUTA UNIVERSAL (PIE / AUTO), CICLO REAL Y AUTO-EAT
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -8,10 +8,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local HttpService = game:GetService("HttpService")
-local ProximityPromptService = game:GetService("ProximityPromptService")
 local lp = Players.LocalPlayer
 
--- Carpetas y estado
 local MarkersFolder = workspace:FindFirstChild("YellowRouteMarkers")
 if not MarkersFolder then
     MarkersFolder = Instance.new("Folder")
@@ -21,33 +19,38 @@ end
 
 local Config = {
     PatrolRunning = false,
-    WaypointWait = 0,         -- Segundos de parada por punto (por defecto 0)
+    WaypointWait = 0,             -- Segundos de parada por punto (por defecto 0)
     AutoRecord = false,
-    StepDist = 35,            -- Distancia automática entre bolitas
-    ShowMarkers = true,       -- Visibilidad de bolitas (anti-lag)
+    StepDist = 30,                -- Distancia entre bolitas automáticas
+    ShowMarkers = true,
 
-    -- Ciclo Día / Noche (ClockTime en Roblox: 0 a 24)
-    DayStartHour = 6.2,       -- Hora en la que amanece y sale a patrullar
-    NightReturnHour = 17.5,   -- Hora en la que regresa a la base antes de anochecer
+    -- Velocidad y Movimiento
+    CarSpeed = 75,                -- Velocidad de empuje si vas en auto
+    WaypointTolerance = 5.5,      -- Distancia para considerar alcanzado el punto
+
+    -- Detección Día / Noche
+    IgnoreDayNight = false,       -- Si está activo, recorre las 24 horas sin volver
+    ReturnEarlySeconds = 30,      -- Segundos antes de anochecer para regresar a base
 
     -- Auto-Eat
     AutoEatEnabled = true,
-    EatDurationAtBase = 4,    -- Segundos comiendo antes de partir
-    HungerThreshold = 75      -- Se detiene al superar el 75% de comida
+    EatDurationAtBase = 4,
+    HungerThreshold = 75
 }
 
-local Waypoints = {}          -- Lista de Vector3
-local MarkerInstances = {}    -- Lista de Parts
+local Waypoints = {}
+local MarkerInstances = {}
 local LastRecordPos = nil
 local CurrentWaypointIndex = 1
-local IsReturningHome = false
+local IsDaytimeGlobal = true
+local SecondsUntilNight = 999
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
-    Title = "MAP PATROL HUB",
+    Title = "MAP PATROL HUB | 500+ NODOS",
     SubTitle = "Sobrevive al Apocalipsis",
     TabWidth = 160,
-    Size = UDim2.fromOffset(580, 500),
+    Size = UDim2.fromOffset(590, 520),
     Acrylic = true,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -61,15 +64,15 @@ local Tabs = {
     Settings = Window:AddTab({ Title = "Ajustes", Icon = "settings" })
 }
 
--- PÁRRAFOS DE ESTADO EN VIVO
+-- PÁRRAFOS DE ESTADO
 local StatusParagraph = Tabs.Main:AddParagraph({
-    Title = "Estado del Sistema",
-    Content = "Inactivo. Graba o importa una ruta y presiona Iniciar."
+    Title = "Estado del Patrullaje",
+    Content = "Inactivo. Carga tu ruta y presiona Iniciar."
 })
 
-local TimeParagraph = Tabs.Main:AddParagraph({
-    Title = "Ciclo del Mapa",
-    Content = "Consultando hora del juego..."
+local CycleParagraph = Tabs.Main:AddParagraph({
+    Title = "Ciclo Detectado en Vivo",
+    Content = "Analizando pantalla..."
 })
 
 local function updateStatus(text)
@@ -86,22 +89,151 @@ local function getHumanoid()
     return char and char:FindFirstChildOfClass("Humanoid")
 end
 
+local function getCurrentVehicle()
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
+        local seat = hum.SeatPart
+        local carModel = seat:FindFirstAncestorOfClass("Model")
+        return carModel, seat
+    end
+    return nil, nil
+end
+
+-- DETECTOR AVANZADO DEL CICLO DÍA / NOCHE (LEE LA PANTALLA Y EL RELOJ)
+local function scanGameDayNight()
+    if Config.IgnoreDayNight then
+        IsDaytimeGlobal = true
+        SecondsUntilNight = 999
+        return true, 999
+    end
+
+    local detectedDay = true
+    local remainingSecs = 999
+
+    -- 1. Buscar en la interfaz de pantalla (PlayerGui) por texto de tiempo y estado
+    local pGui = lp:FindFirstChild("PlayerGui")
+    if pGui then
+        for _, lbl in ipairs(pGui:GetDescendants()) do
+            if lbl:IsA("TextLabel") and lbl.Visible then
+                local txt = lbl.Text:lower()
+                
+                -- Detectar si dice explícitamente Noche
+                if txt:find("noche") or txt:find("night") then
+                    detectedDay = false
+                end
+
+                -- Detectar cronómetro mm:ss (ej: 03:45 o 00:25)
+                local m, s = txt:match("(%d+):(%d+)")
+                if m and s then
+                    local total = (tonumber(m) * 60) + tonumber(s)
+                    if not txt:find("revivir") and not txt:find("espera") then
+                        remainingSecs = total
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Verificación secundaria con la luz del mapa (Lighting)
+    local clock = Lighting.ClockTime
+    if clock < 5.8 or clock > 18.2 then
+        detectedDay = false
+    end
+
+    IsDaytimeGlobal = detectedDay
+    SecondsUntilNight = remainingSecs
+    return detectedDay, remainingSecs
+end
+
+-- MONITOR DE ESTADO EN PANTALLA
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local isDay, secs = scanGameDayNight()
+        local car = getCurrentVehicle()
+        local modeText = car and "🚗 EN VEHÍCULO" or "🏃 A PIE"
+
+        if Config.IgnoreDayNight then
+            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: ☀️ DÍA FORZADO (24h Activo)", modeText))
+        else
+            local timeInfo = (secs < 900) and string.format(" (Quedan: %ds)", secs) or ""
+            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: %s%s", modeText, isDay and "☀️ DÍA" or "🌙 NOCHE", timeInfo))
+        end
+    end
+end)
+
+-- SISTEMA DE MOVIMIENTO UNIVERSAL (PIE Y AUTO CON ANTI-ATASCO)
+local function navigateToPosition(targetPos, timeoutSecs)
+    local timeout = tick() + (timeoutSecs or 20)
+    local lastPos = nil
+    local stuckFrames = 0
+
+    while Config.PatrolRunning and tick() < timeout do
+        RunService.Heartbeat:Wait()
+
+        local root = getRootPart()
+        local hum = getHumanoid()
+        local car, seat = getCurrentVehicle()
+
+        if not root or not hum or hum.Health <= 0 then return false end
+
+        -- Distancia horizontal
+        local myPos = (car and seat) and seat.Position or root.Position
+        local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
+        local dist = delta.Magnitude
+
+        if dist <= Config.WaypointTolerance then
+            if seat then
+                seat.Throttle = 0
+                seat.AssemblyLinearVelocity = Vector3.new(0, seat.AssemblyLinearVelocity.Y, 0)
+            end
+            return true
+        end
+
+        -- Detección de atascos (salto o impulso si no avanza)
+        if lastPos and (myPos - lastPos).Magnitude < 0.2 then
+            stuckFrames = stuckFrames + 1
+            if stuckFrames >= 30 then
+                if not car then
+                    hum.Jump = true
+                else
+                    seat.AssemblyLinearVelocity = seat.AssemblyLinearVelocity + Vector3.new(0, 15, 0)
+                end
+                stuckFrames = 0
+            end
+        else
+            stuckFrames = 0
+            lastPos = myPos
+        end
+
+        -- A) MOVIMIENTO EN AUTO
+        if car and seat then
+            seat.Throttle = 1
+            -- Orientar suavemente hacia el punto
+            car:PivotTo(CFrame.new(myPos, Vector3.new(targetPos.X, myPos.Y, targetPos.Z)))
+            local driveVel = delta.Unit * Config.CarSpeed
+            seat.AssemblyLinearVelocity = Vector3.new(driveVel.X, seat.AssemblyLinearVelocity.Y, driveVel.Z)
+        
+        -- B) MOVIMIENTO A PIE
+        else
+            hum:MoveTo(targetPos)
+        end
+    end
+
+    return false
+end
+
 -- LECTURA DE HAMBRE DEL PERSONAJE
 local function getPlayerHunger()
     local char = lp.Character
     if not char then return 100 end
 
-    -- 1. Atributo directo
-    local attr = char:GetAttribute("Hunger") or char:GetAttribute("Hambre") or lp:GetAttribute("Hunger")
-    if attr and type(attr) == "number" then return attr end
-
-    -- 2. Valor dentro del modelo
     local val = char:FindFirstChild("Hunger") or char:FindFirstChild("Hambre")
-    if val and val:IsA("NumberValue") or (val and val:IsA("IntValue")) then
+    if val and (val:IsA("NumberValue") or val:IsA("IntValue")) then
         return val.Value
     end
 
-    -- 3. Barra en PlayerGui (búsqueda rápida)
     local pGui = lp:FindFirstChild("PlayerGui")
     if pGui then
         for _, obj in ipairs(pGui:GetDescendants()) do
@@ -111,30 +243,25 @@ local function getPlayerHunger()
             end
         end
     end
-
-    return 50 -- Si no se detecta la barra, asume un nivel medio seguro
+    return 50
 end
 
--- RUTINA DE AUTO-EAT (SOLO EN EL PUNTO 1)
+-- AUTO-EAT EN EL PUNTO 1
 local function performBaseEating()
     if not Config.AutoEatEnabled then return end
-    updateStatus("Base: Comiendo y recuperando energías...")
+    updateStatus("Base: Comiendo...")
 
-    local startTime = tick()
-    while tick() - startTime < Config.EatDurationAtBase do
+    local start = tick()
+    while tick() - start < Config.EatDurationAtBase do
         task.wait(0.2)
-        local hunger = getPlayerHunger()
-        if hunger >= Config.HungerThreshold then
-            break
-        end
+        if getPlayerHunger() >= Config.HungerThreshold then break end
 
-        -- 1. Intentar interactuar con alimentos cercanos en la base
         local root = getRootPart()
         if root then
             for _, prompt in ipairs(workspace:GetDescendants()) do
                 if prompt:IsA("ProximityPrompt") then
                     local pText = (prompt.ObjectText .. " " .. prompt.ActionText):lower()
-                    if pText:find("com") or pText:find("eat") or pText:find("food") or pText:find("aliment") or pText:find("tomar") then
+                    if pText:find("com") or pText:find("eat") or pText:find("food") or pText:find("manzana") then
                         local pPart = prompt.Parent
                         if pPart and pPart:IsA("BasePart") and (pPart.Position - root.Position).Magnitude <= 15 then
                             prompt.HoldDuration = 0
@@ -145,31 +272,27 @@ local function performBaseEating()
             end
         end
 
-        -- 2. Equipar y usar comida del inventario si existe
         local backpack = lp:FindFirstChild("Backpack")
         local char = lp.Character
         local tool = (char and char:FindFirstChildWhichIsA("Tool")) or (backpack and backpack:FindFirstChildWhichIsA("Tool"))
-        if tool then
-            local tName = tool.Name:lower()
-            if tName:find("food") or tName:find("comida") or tName:find("manzana") or tName:find("bread") or tName:find("meat") then
-                if tool.Parent == backpack and char then
-                    local hum = getHumanoid()
-                    if hum then hum:EquipTool(tool) end
-                end
-                pcall(function() tool:Activate() end)
+        if tool and (tool.Name:lower():find("food") or tool.Name:lower():find("comida") or tool.Name:lower():find("manzana")) then
+            if tool.Parent == backpack and char then
+                local hum = getHumanoid()
+                if hum then hum:EquipTool(tool) end
             end
+            pcall(function() tool:Activate() end)
         end
     end
 end
 
--- CREACIÓN OPTIMIZADA DE BOLITAS (0 LAG)
+-- CREACIÓN OPTIMIZADA DE BOLITAS (0 LAG PARA 500+ PUNTOS)
 local function createMarker(pos, index)
     local marker = Instance.new("Part")
     marker.Name = "RouteNode_" .. index
     marker.Shape = Enum.PartType.Ball
     marker.Size = Vector3.new(1.8, 1.8, 1.8)
     marker.Material = Enum.Material.Neon
-    marker.Color = (index == 1) and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(255, 220, 0) -- Verde base, amarillo ruta
+    marker.Color = (index == 1) and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(255, 220, 0)
     marker.Anchored = true
     marker.CanCollide = false
     marker.CanTouch = false
@@ -190,31 +313,18 @@ local function redrawAllMarkers()
     end
 end
 
--- MONITOR DE RELOJ Y TIEMPO DEL JUEGO
-task.spawn(function()
-    while true do
-        task.wait(1)
-        local clock = Lighting.ClockTime
-        local hours = math.floor(clock)
-        local mins = math.floor((clock - hours) * 60)
-        local isDay = (clock >= Config.DayStartHour and clock < Config.NightReturnHour)
-
-        TimeParagraph:SetDesc(string.format("Hora del Mapa: %02d:%02d | Estado: %s", hours, mins, isDay and "☀️ DÍA (Seguro para recorrer)" or "🌙 NOCHE (Esperando en Base)"))
-    end
-end)
-
 -- PESTAÑA 1: PATRULLAJE
-Tabs.Main:AddSection("Operación de la Ruta")
+Tabs.Main:AddSection("Control de Ruta")
 
 Tabs.Main:AddButton({
-    Title = "▶ INICIAR PATRULLAJE DÍA/NOCHE",
+    Title = "▶ INICIAR PATRULLAJE",
     Callback = function()
         if #Waypoints < 2 then
-            Fluent:Notify({ Title = "Ruta Insuficiente", Content = "Graba al menos 2 puntos para comenzar.", Duration = 3 })
+            Fluent:Notify({ Title = "Ruta Vacía", Content = "Importa o graba puntos primero.", Duration = 3 })
             return
         end
         Config.PatrolRunning = true
-        updateStatus("Iniciado. Evaluando ciclo día/noche...")
+        updateStatus("Iniciado. Evaluando condiciones...")
     end
 })
 
@@ -222,30 +332,36 @@ Tabs.Main:AddButton({
     Title = "⏹ DETENER PATRULLAJE",
     Callback = function()
         Config.PatrolRunning = false
-        IsReturningHome = false
         local hum = getHumanoid()
         local root = getRootPart()
-        if hum and root then
-            hum:MoveTo(root.Position)
-        end
-        updateStatus("Patrullaje detenido manualmente.")
+        if hum and root then hum:MoveTo(root.Position) end
+        local _, seat = getCurrentVehicle()
+        if seat then seat.Throttle = 0 end
+        updateStatus("Detenido manualmente.")
     end
 })
 
 Tabs.Main:AddSlider("WaitTimeSlider", {
-    Title = "Espera en cada punto (Segundos)",
+    Title = "Espera en cada punto (Seg)",
     Default = 0,
     Min = 0,
-    Max = 10,
+    Max = 8,
     Rounding = 1,
     Callback = function(Value) Config.WaypointWait = Value end
 })
 
--- PESTAÑA 2: GRABADOR DE RUTA
-Tabs.Recorder:AddSection("Grabado Manual y Automático")
+Tabs.Main:AddToggle("IgnoreDayNightToggle", {
+    Title = "Forzar Modo Día (Ignorar Noche)",
+    Description = "Actívalo si no quieres que regrese a la base y recorra las 24 horas",
+    Default = false,
+    Callback = function(Value) Config.IgnoreDayNight = Value end
+})
+
+-- PESTAÑA 2: GRABADOR
+Tabs.Recorder:AddSection("Grabado de Coordenadas")
 
 Tabs.Recorder:AddToggle("AutoRecordToggle", {
-    Title = "Auto-Grabar al Caminar",
+    Title = "Auto-Grabar al Moverse",
     Default = false,
     Callback = function(Value)
         Config.AutoRecord = Value
@@ -255,9 +371,9 @@ Tabs.Recorder:AddToggle("AutoRecordToggle", {
 
 Tabs.Recorder:AddSlider("StepDistSlider", {
     Title = "Distancia entre Bolitas (Studs)",
-    Default = 35,
+    Default = 30,
     Min = 15,
-    Max = 80,
+    Max = 70,
     Rounding = 0,
     Callback = function(Value) Config.StepDist = Value end
 })
@@ -269,74 +385,61 @@ Tabs.Recorder:AddButton({
         if root then
             table.insert(Waypoints, root.Position)
             createMarker(root.Position, #Waypoints)
-            Fluent:Notify({ Title = "Punto Guardado", Content = "Total de puntos: " .. #Waypoints, Duration = 1.5 })
+            Fluent:Notify({ Title = "Punto Guardado", Content = "Total: " .. #Waypoints, Duration = 1.5 })
         end
     end
 })
 
 Tabs.Recorder:AddButton({
-    Title = "Borrar Toda la Ruta",
+    Title = "Borrar Todos los Puntos",
     Callback = function()
         table.clear(Waypoints)
         MarkersFolder:ClearAllChildren()
         table.clear(MarkerInstances)
         LastRecordPos = nil
         CurrentWaypointIndex = 1
-        Fluent:Notify({ Title = "Ruta Eliminada", Content = "Se borraron todos los puntos.", Duration = 2 })
+        Fluent:Notify({ Title = "Ruta Borrada", Content = "Puntos eliminados.", Duration = 2 })
     end
 })
 
 Tabs.Recorder:AddToggle("ShowMarkersToggle", {
     Title = "Mostrar Bolitas Amarillas (Anti-Lag)",
-    Description = "Desactívalo si tienes 300+ puntos para ganar el 100% de FPS",
     Default = true,
     Callback = function(Value)
         Config.ShowMarkers = Value
         for _, m in ipairs(MarkerInstances) do
-            if m and m.Parent then
-                m.Transparency = Value and 0 or 1
-            end
+            if m and m.Parent then m.Transparency = Value and 0 or 1 end
         end
     end
 })
 
 -- PESTAÑA 3: IMPORTAR / EXPORTAR
-Tabs.Port:AddSection("Copia de Seguridad de la Ruta")
+Tabs.Port:AddSection("Copia de Seguridad JSON")
 
 Tabs.Port:AddButton({
     Title = "📋 EXPORTAR RUTA (Copiar al Portapapeles)",
-    Description = "Copia todas las coordenadas en formato JSON para no perderlas",
     Callback = function()
         if #Waypoints == 0 then
-            Fluent:Notify({ Title = "Sin Puntos", Content = "No hay puntos grabados para exportar.", Duration = 2 })
+            Fluent:Notify({ Title = "Sin Puntos", Content = "No hay puntos para exportar.", Duration = 2 })
             return
         end
 
-        local cleanData = {}
+        local clean = {}
         for _, v in ipairs(Waypoints) do
-            table.insert(cleanData, {math.floor(v.X * 10) / 10, math.floor(v.Y * 10) / 10, math.floor(v.Z * 10) / 10})
+            table.insert(clean, {math.floor(v.X * 10) / 10, math.floor(v.Y * 10) / 10, math.floor(v.Z * 10) / 10})
         end
 
-        local jsonString = HttpService:JSONEncode(cleanData)
-        if setclipboard then
-            setclipboard(jsonString)
-        elseif toclipboard then
-            toclipboard(jsonString)
-        end
-
-        print("\n[RUTA EXPORTADA - TOTAL PUNTOS: " .. #Waypoints .. "]:\n" .. jsonString .. "\n")
-        Fluent:Notify({
-            Title = "¡Ruta Copiada!",
-            Content = string.format("Se copiaron %d puntos al portapapeles.", #Waypoints),
-            Duration = 4
-        })
+        local json = HttpService:JSONEncode(clean)
+        if setclipboard then setclipboard(json) elseif toclipboard then toclipboard(json) end
+        print("\n[RUTA EXPORTADA - PUNTOS: " .. #Waypoints .. "]:\n" .. json .. "\n")
+        Fluent:Notify({ Title = "¡Copiado!", Content = string.format("%d puntos copiados.", #Waypoints), Duration = 3 })
     end
 })
 
 local ImportInput = Tabs.Port:AddInput("ImportBox", {
-    Title = "Pegar Código de Ruta aquí",
+    Title = "Pegar JSON de Ruta Aquí",
     Default = "",
-    Placeholder = "Pega aquí el JSON exportado...",
+    Placeholder = "Pega aquí las coordenadas...",
     Numeric = false,
     Finished = false,
     Callback = function() end
@@ -345,30 +448,23 @@ local ImportInput = Tabs.Port:AddInput("ImportBox", {
 Tabs.Port:AddButton({
     Title = "📥 CARGAR RUTA IMPORTADA",
     Callback = function()
-        local rawText = ImportInput.Value
-        if not rawText or #rawText < 5 then
-            Fluent:Notify({ Title = "Texto Vacío", Content = "Pega primero el código en la casilla.", Duration = 2 })
+        local txt = ImportInput.Value
+        if not txt or #txt < 5 then
+            Fluent:Notify({ Title = "Vacío", Content = "Pega el texto primero.", Duration = 2 })
             return
         end
 
-        local success, decoded = pcall(function()
-            return HttpService:JSONDecode(rawText)
-        end)
-
-        if success and type(decoded) == "table" then
+        local ok, decoded = pcall(function() return HttpService:JSONDecode(txt) end)
+        if ok and type(decoded) == "table" then
             table.clear(Waypoints)
-            for _, item in ipairs(decoded) do
-                table.insert(Waypoints, Vector3.new(item[1], item[2], item[3]))
+            for _, pt in ipairs(decoded) do
+                table.insert(Waypoints, Vector3.new(pt[1], pt[2], pt[3]))
             end
             redrawAllMarkers()
             CurrentWaypointIndex = 1
-            Fluent:Notify({
-                Title = "Ruta Cargada",
-                Content = string.format("Se cargaron %d puntos exitosamente.", #Waypoints),
-                Duration = 4
-            })
+            Fluent:Notify({ Title = "Ruta Cargada", Content = string.format("Cargados %d puntos.", #Waypoints), Duration = 4 })
         else
-            Fluent:Notify({ Title = "Error de Formato", Content = "El texto pegado no es un código de ruta válido.", Duration = 3 })
+            Fluent:Notify({ Title = "Error", Content = "Formato de texto inválido.", Duration = 3 })
         end
     end
 })
@@ -377,53 +473,45 @@ Tabs.Port:AddButton({
 Tabs.Survival:AddSection("Auto-Alimentación en Base (Punto 1)")
 
 Tabs.Survival:AddToggle("AutoEatToggle", {
-    Title = "Activar Auto-Eat en la Base",
+    Title = "Activar Auto-Eat al Salir de Base",
     Default = true,
     Callback = function(Value) Config.AutoEatEnabled = Value end
 })
 
-Tabs.Survival:AddSlider("EatDurationSlider", {
-    Title = "Tiempo de comida en Base (Segundos)",
+Tabs.Survival:AddSlider("EatTimeSlider", {
+    Title = "Segundos comiendo en Base",
     Default = 4,
     Min = 2,
-    Max = 15,
+    Max = 12,
     Rounding = 0,
     Callback = function(Value) Config.EatDurationAtBase = Value end
 })
 
-Tabs.Survival:AddSlider("HungerLimitSlider", {
-    Title = "Límite de saciedad (%)",
-    Default = 75,
-    Min = 50,
-    Max = 95,
+-- PESTAÑA 5: AJUSTES
+Tabs.Settings:AddSection("Retiro Preventivo y Vehículo")
+
+Tabs.Settings:AddSlider("ReturnEarlySlider", {
+    Title = "Segundos de anticipación antes de noche",
+    Description = "Tiempo antes de anochecer para abortar y volver a base",
+    Default = 30,
+    Min = 10,
+    Max = 60,
     Rounding = 0,
-    Callback = function(Value) Config.HungerThreshold = Value end
+    Callback = function(Value) Config.ReturnEarlySeconds = Value end
 })
 
--- PESTAÑA 5: AJUSTES DE HORARIO
-Tabs.Settings:AddSection("Umbrales de Horario Día/Noche")
-
-Tabs.Settings:AddSlider("DayStartSlider", {
-    Title = "Hora de Salida matutina",
-    Default = 6.2,
-    Min = 5.0,
-    Max = 9.0,
-    Rounding = 1,
-    Callback = function(Value) Config.DayStartHour = Value end
-})
-
-Tabs.Settings:AddSlider("NightReturnSlider", {
-    Title = "Hora de Retiro a la Base",
-    Default = 17.5,
-    Min = 15.0,
-    Max = 20.0,
-    Rounding = 1,
-    Callback = function(Value) Config.NightReturnHour = Value end
+Tabs.Settings:AddSlider("CarSpeedSlider", {
+    Title = "Fuerza de empuje del auto",
+    Default = 75,
+    Min = 30,
+    Max = 140,
+    Rounding = 0,
+    Callback = function(Value) Config.CarSpeed = Value end
 })
 
 -- BOTÓN FLOTANTE CÍRCULAR (Y = 0.40)
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "PatrolHubFloatingBtn"
+ScreenGui.Name = "MapPatrolFloatBtn"
 ScreenGui.ResetOnSpawn = false
 if gethui then
     ScreenGui.Parent = gethui()
@@ -451,82 +539,62 @@ FloatBtn.MouseButton1Click:Connect(function()
     Window.Root.Visible = isWindowOpen
 end)
 
--- BUCLE DE AUTO-GRABADO AL CAMINAR
+-- BUCLE DE GRABADO
 task.spawn(function()
     while true do
         task.wait(0.3)
         if Config.AutoRecord then
             local root = getRootPart()
             if root then
-                local currentPos = root.Position
-                if not LastRecordPos or (currentPos - LastRecordPos).Magnitude >= Config.StepDist then
-                    LastRecordPos = currentPos
-                    table.insert(Waypoints, currentPos)
-                    createMarker(currentPos, #Waypoints)
+                local myPos = root.Position
+                if not LastRecordPos or (myPos - LastRecordPos).Magnitude >= Config.StepDist then
+                    LastRecordPos = myPos
+                    table.insert(Waypoints, myPos)
+                    createMarker(myPos, #Waypoints)
                 end
             end
         end
     end
 end)
 
--- BUCLE MAESTRO DE PATRULLAJE Y CICLO DÍA/NOCHE
+-- BUCLE MAESTRO DE PATRULLAJE
 task.spawn(function()
     while true do
-        task.wait(0.2)
+        task.wait(0.15)
 
         if Config.PatrolRunning and #Waypoints >= 2 then
-            local clock = Lighting.ClockTime
-            local isDay = (clock >= Config.DayStartHour and clock < Config.NightReturnHour)
+            local isDay, secsLeft = scanGameDayNight()
+            local basePos = Waypoints[1]
             local root = getRootPart()
-            local hum = getHumanoid()
 
-            if root and hum and hum.Health > 0 then
-                local basePos = Waypoints[1]
+            if root then
+                -- ¿Debe retirarse a la base? (Es de noche o faltan pocos segundos para anochecer)
+                local shouldBeAtBase = (not isDay) or (secsLeft <= Config.ReturnEarlySeconds)
 
-                -- CASO 1: ES DE NOCHE O ESTÁ POR ANOCHECER -> VOLVER A LA BASE
-                if not isDay then
+                if shouldBeAtBase and not Config.IgnoreDayNight then
                     local distToBase = (root.Position - basePos).Magnitude
-
-                    if distToBase > 6 then
-                        updateStatus("Anocheciendo: Regresando a la Base (Punto 1)...")
-                        hum:MoveTo(basePos)
+                    if distToBase > Config.WaypointTolerance then
+                        updateStatus(string.format("⚠️ Anocheciendo (%ds restantes): Volviendo a Base...", secsLeft))
+                        navigateToPosition(basePos, 30)
                     else
-                        updateStatus("Noche activa: Resguardado en la Base. Esperando el amanecer...")
-                        -- Comer en la base mientras pasa la noche
+                        updateStatus("🌙 Resguardado en Base (Punto 1). Esperando amanecer...")
                         performBaseEating()
                         task.wait(2)
                     end
-
-                -- CASO 2: ES DE DÍA -> RECORRER LA RUTA
                 else
-                    -- Si apenas va a salir de la base, come primero
-                    local distToBase = (root.Position - basePos).Magnitude
-                    if CurrentWaypointIndex == 1 and distToBase < 8 then
-                        performBaseEating()
+                    -- ES DE DÍA: Recorrer ruta secuencial
+                    if CurrentWaypointIndex == 1 then
+                        local distToBase = (root.Position - basePos).Magnitude
+                        if distToBase <= Config.WaypointTolerance + 4 then
+                            performBaseEating()
+                        end
                         CurrentWaypointIndex = 2
                     end
 
-                    -- Avanzar al siguiente punto
-                    local targetPos = Waypoints[CurrentWaypointIndex]
-                    if targetPos then
+                    local target = Waypoints[CurrentWaypointIndex]
+                    if target then
                         updateStatus(string.format("Patrullando: Punto [%d / %d]", CurrentWaypointIndex, #Waypoints))
-                        hum:MoveTo(targetPos)
-
-                        local reached = false
-                        local moveTimeout = tick() + 15
-
-                        while Config.PatrolRunning and not reached and tick() < moveTimeout do
-                            task.wait(0.05)
-                            -- Comprobar si se hizo de noche a mitad de camino
-                            local currentClock = Lighting.ClockTime
-                            if not (currentClock >= Config.DayStartHour and currentClock < Config.NightReturnHour) then
-                                break
-                            end
-
-                            if (root.Position - targetPos).Magnitude <= 5 then
-                                reached = true
-                            end
-                        end
+                        local reached = navigateToPosition(target, 20)
 
                         if reached then
                             if Config.WaypointWait > 0 then
@@ -534,7 +602,7 @@ task.spawn(function()
                             end
                             CurrentWaypointIndex = CurrentWaypointIndex + 1
                             if CurrentWaypointIndex > #Waypoints then
-                                CurrentWaypointIndex = 1 -- Bucle completo, vuelve a la base
+                                CurrentWaypointIndex = 1
                             end
                         end
                     end
@@ -545,8 +613,8 @@ task.spawn(function()
 end)
 
 Fluent:Notify({
-    Title = "MAP PATROL LISTO",
-    Content = "Gestor de rutas con ciclo día/noche y exportador cargado.",
+    Title = "MAP PATROL HUB LISTO",
+    Content = "Motor universal para auto/a pie y detector de pantalla activos.",
     Duration = 4
 })
 
