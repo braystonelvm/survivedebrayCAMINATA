@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - DESATASCO CON PAUSA DE 3.5s, SUSPENSIÓN SEGURA Y RETORNO
+-- MAP PATROL HUB - SIN BUGS DE RUEDAS, RESCATE DE AUTO Y TRASPASO LIMPIO
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -24,24 +24,21 @@ local Config = {
     ShowMarkers = true,
     CarSpeed = 80,
     IgnoreDayNight = false,
-    ReturnEarlySeconds = 15,
-
-    -- Desatasco inteligente seguro
-    UnstuckEnabled = true
+    ReturnEarlySeconds = 15
 }
 
 local Waypoints = {}
 local MarkerInstances = {}
 local LastRecordPos = nil
 local PatrolThread = nil
-local ConsecutiveSkips = 0
+local LastKnownCar = nil
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
     Title = "MAP PATROL HUB | 500+ NODOS",
     SubTitle = "Sobrevive al Apocalipsis",
     TabWidth = 160,
-    Size = UDim2.fromOffset(590, 510),
+    Size = UDim2.fromOffset(590, 520),
     Acrylic = true,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -49,6 +46,7 @@ local Window = Fluent:CreateWindow({
 
 local Tabs = {
     Main = Window:AddTab({ Title = "Patrullaje", Icon = "play" }),
+    Vehicle = Window:AddTab({ Title = "Control Auto", Icon = "truck" }),
     Recorder = Window:AddTab({ Title = "Grabador", Icon = "map-pin" }),
     Port = Window:AddTab({ Title = "Import/Export", Icon = "clipboard" }),
     Settings = Window:AddTab({ Title = "Ajustes", Icon = "settings" })
@@ -84,9 +82,124 @@ local function getCurrentVehicle()
     if hum and hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
         local seat = hum.SeatPart
         local carModel = seat:FindFirstAncestorOfClass("Model")
+        if carModel then LastKnownCar = carModel end
         return carModel, seat
     end
     return nil, nil
+end
+
+-- RASTREADOR EN SEGUNDO PLANO DEL AUTO
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local car = getCurrentVehicle()
+        if car then LastKnownCar = car end
+    end
+end)
+
+-- RESETEAR FÍSICAS Y DESBUGEAR AUTO
+local function resetVehiclePhysics()
+    local car, seat = getCurrentVehicle()
+    if not car and LastKnownCar and LastKnownCar.Parent then
+        car = LastKnownCar
+        seat = car:FindFirstChildWhichIsA("VehicleSeat", true)
+    end
+
+    if car then
+        for _, p in ipairs(car:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            elseif p:IsA("BodyMover") or p:IsA("VectorForce") or p:IsA("LinearVelocity") then
+                p:Destroy()
+            end
+        end
+
+        if seat then
+            seat.Throttle = 0
+            seat.Steer = 0
+            local curPos = seat.Position
+            local safeY = math.max(curPos.Y, 3.5)
+            pcall(function()
+                local look = seat.CFrame.LookVector
+                car:PivotTo(CFrame.new(Vector3.new(curPos.X, safeY, curPos.Z), Vector3.new(curPos.X + look.X, safeY, curPos.Z + look.Z)))
+            end)
+        end
+    end
+
+    local root = getRootPart()
+    if root then
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        for _, p in ipairs(lp.Character:GetDescendants()) do
+            if p:IsA("BodyMover") then p:Destroy() end
+        end
+    end
+
+    Fluent:Notify({ Title = "Auto Normalizado", Content = "Físicas y velocidades reseteadas.", Duration = 2.5 })
+end
+
+-- RESCATAR AUTO PERDIDO (DEL CIELO O BAJO TIERRA)
+local function rescueLostCar()
+    local car = LastKnownCar
+    if not car or not car.Parent then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("VehicleSeat") then
+                car = obj:FindFirstAncestorOfClass("Model")
+                if car then
+                    LastKnownCar = car
+                    break
+                end
+            end
+        end
+    end
+
+    if not car then
+        Fluent:Notify({ Title = "Sin Auto", Content = "No se encontró ningún vehículo en el mapa.", Duration = 3 })
+        return
+    end
+
+    local seat = car:FindFirstChildWhichIsA("VehicleSeat", true)
+    local root = getRootPart()
+    local hum = getHumanoid()
+    if not root or not hum then return end
+
+    updateStatus("🚨 Rescatando auto del abismo/cielo...")
+
+    -- Destino seguro: Punto 1 o suelo cercano
+    local targetPos = (Waypoints and #Waypoints > 0 and Waypoints[1]) or Vector3.new(root.Position.X, 4.0, root.Position.Z)
+    local safeCF = CFrame.new(targetPos.X, math.max(targetPos.Y, 3.5) + 2.5, targetPos.Z)
+
+    -- 1. Detener caídas y limpiar físicas del auto
+    for _, p in ipairs(car:GetDescendants()) do
+        if p:IsA("BasePart") then
+            p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        elseif p:IsA("BodyMover") then
+            p:Destroy()
+        end
+    end
+
+    -- 2. Teletransportar el auto a la superficie
+    pcall(function()
+        car:PivotTo(safeCF)
+    end)
+    task.wait(0.1)
+
+    -- 3. Teletransportar al jugador y sentarlo adentro
+    root.CFrame = safeCF + Vector3.new(0, 3, 0)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+
+    if seat then
+        seat.Throttle = 0
+        seat.Steer = 0
+        task.wait(0.15)
+        pcall(function() seat:Sit(hum) end)
+    end
+
+    resetVehiclePhysics()
+    updateStatus("Auto rescatado y colocado a salvo en el suelo.")
+    Fluent:Notify({ Title = "¡Auto Rescatado!", Content = "El auto volvió a la superficie y está listo.", Duration = 4 })
 end
 
 -- DETECTOR DE DÍA / NOCHE
@@ -138,97 +251,8 @@ task.spawn(function()
     end
 end)
 
--- SISTEMA DE DESATASCO CON PAUSA DE 3.5s Y SUSPENSIÓN PROTEGIDA
-local function performSafeUnstuck(lastSafePos)
-    if not Config.UnstuckEnabled then return end
-
-    local car, seat = getCurrentVehicle()
-    local root = getRootPart()
-    local controlledPart = seat or root
-    if not controlledPart then return end
-
-    -- PASO 1: FRENAR EN SECO Y ESTABILIZAR (3.5 segundos para que repose en el suelo)
-    updateStatus("⚠️ Atasco detectado: Frenando y estabilizando 3.5s...")
-    if seat then
-        seat.Throttle = 0
-        seat.Steer = 0
-        seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    end
-    task.wait(3.5)
-
-    if not Config.PatrolRunning then return end
-
-    updateStatus("⚠️ Desatascando: Elevación suave y salida...")
-
-    -- PASO 2: ELEVAR SUAVEMENTE 4 STUDS Y APUNTAR AL CAMINO LIBRE
-    if car and seat then
-        local currentPos = seat.Position
-        local targetLook = lastSafePos and Vector3.new(lastSafePos.X, currentPos.Y, lastSafePos.Z) or (currentPos - seat.CFrame.LookVector * 10)
-        pcall(function()
-            car:PivotTo(CFrame.new(currentPos + Vector3.new(0, 4.0, 0), targetLook))
-        end)
-        seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    else
-        if root then
-            root.CFrame = root.CFrame + Vector3.new(0, 4.0, 0)
-            root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        end
-    end
-
-    -- PASO 3: NOCLIP QUIRÚRGICO (PROTEGIENDO RUEDAS PARA NO BUGUEAR LA SUSPENSIÓN)
-    local char = lp.Character
-    local noclipConn = RunService.Stepped:Connect(function()
-        if car then
-            for _, p in ipairs(car:GetDescendants()) do
-                if p:IsA("BasePart") then
-                    local n = p.Name:lower()
-                    -- REGLA DE ORO: Las ruedas y resortes NUNCA pierden colisión
-                    if not n:find("wheel") and not n:find("tire") and not n:find("rueda") and not n:find("llanta") and not n:find("susp") then
-                        p.CanCollide = false
-                    end
-                end
-            end
-        end
-        if char then
-            for _, p in ipairs(char:GetDescendants()) do
-                if p:IsA("BasePart") then p.CanCollide = false end
-            end
-        end
-    end)
-
-    -- Acelerar hacia adelante para salir de la pared
-    if seat then
-        seat.Throttle = 1
-        seat.AssemblyLinearVelocity = controlledPart.CFrame.LookVector * 40
-    end
-    task.wait(1.0)
-
-    -- PASO 4: APAGAR NOCLIP Y RESTAURAR FÍSICAS EN EL SUELO
-    noclipConn:Disconnect()
-    task.wait(0.1)
-
-    if car then
-        for _, p in ipairs(car:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = true end
-        end
-    end
-    if char then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = true end
-        end
-    end
-
-    -- Anular cualquier velocidad residual para que no quede flotando
-    if seat then
-        seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    end
-end
-
--- MANIOBRAS DE ESCAPE LARGAS
-local function evasiveManeuver(attempt, lastSafePos)
+-- MANIOBRAS DE ESCAPE POR FÍSICAS (SIN TOCAR COLISIONES DE RUEDAS)
+local function evasiveManeuver(attempt, targetPos)
     local root = getRootPart()
     local car, seat = getCurrentVehicle()
     local controlledPart = seat or root
@@ -238,31 +262,37 @@ local function evasiveManeuver(attempt, lastSafePos)
 
     if car and seat then
         if attempt == 1 then
-            -- Intento 1: Reversa larga con giro a la derecha
+            -- Intento 1: Retroceso largo a la derecha
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 50) + (cf.RightVector * 35)
-            task.wait(0.65)
+            task.wait(0.6)
             seat.Throttle = 1
-            seat.AssemblyLinearVelocity = (cf.RightVector * 40) + Vector3.new(0, 5, 0)
-            task.wait(0.5)
+            seat.AssemblyLinearVelocity = (cf.RightVector * 40)
+            task.wait(0.4)
         elseif attempt == 2 then
-            -- Intento 2: Reversa larga con giro a la izquierda
+            -- Intento 2: Retroceso largo a la izquierda
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 50) - (cf.RightVector * 35)
-            task.wait(0.65)
+            task.wait(0.6)
             seat.Throttle = 1
-            seat.AssemblyLinearVelocity = (-cf.RightVector * 40) + Vector3.new(0, 5, 0)
-            task.wait(0.5)
+            seat.AssemblyLinearVelocity = (-cf.RightVector * 40)
+            task.wait(0.4)
         elseif attempt == 3 then
-            -- Intento 3: Reversa recta prolongada
+            -- Intento 3: Reversa pura
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 60)
-            task.wait(0.8)
+            task.wait(0.7)
             seat.Throttle = 1
+            task.wait(0.2)
+        elseif attempt >= 4 and targetPos then
+            -- Intento 4: Traspasar pared limpiamente reubicando sobre el punto
+            updateStatus("⚠️ Traspasando pared hacia el punto...")
+            seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            pcall(function()
+                car:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z))
+            end)
             task.wait(0.3)
-        elseif attempt >= 4 then
-            -- Intento 4: Pausa 3.5s + Elevación + Noclip protegido
-            performSafeUnstuck(lastSafePos)
         end
     else
         local hum = getHumanoid()
@@ -271,8 +301,9 @@ local function evasiveManeuver(attempt, lastSafePos)
             local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
             controlledPart.AssemblyLinearVelocity = (-cf.LookVector * 30) + (sideDir * 30)
             task.wait(0.5)
-            if attempt >= 4 then
-                performSafeUnstuck(lastSafePos)
+            if attempt >= 4 and targetPos and root then
+                root.CFrame = CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z)
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             end
         end
     end
@@ -319,19 +350,15 @@ local function walkOrDriveTo(targetPos, maxTime)
     return reached
 end
 
--- INTENTAR HASTA 4 VECES CON ESQUIVES LARGOS
-local function moveToPointWithRetry(targetPos, lastSafePos)
+-- INTENTAR HASTA 4 VECES
+local function moveToPointWithRetry(targetPos)
     for attempt = 1, 4 do
         if not Config.PatrolRunning then return false end
         local success = walkOrDriveTo(targetPos, 3.8)
         if success then
             return true
         else
-            if attempt < 4 then
-                evasiveManeuver(attempt, lastSafePos)
-            else
-                evasiveManeuver(4, lastSafePos)
-            end
+            evasiveManeuver(attempt, targetPos)
         end
     end
     return false
@@ -365,7 +392,7 @@ local function redrawAllMarkers()
     end
 end
 
--- DETENER TODO EN SECO Y RESTAURAR FÍSICAS
+-- DETENER Y NORMALIZAR TODO
 local function stopPatrol()
     Config.PatrolRunning = false
     if PatrolThread then
@@ -377,24 +404,11 @@ local function stopPatrol()
     local root = getRootPart()
     if hum and root then hum:MoveTo(root.Position) end
 
-    local car, seat = getCurrentVehicle()
-    if seat then
-        seat.Throttle = 0
-        seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-        seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-    end
-
-    -- Restaurar colisiones en todo el vehículo
-    if car then
-        for _, p in ipairs(car:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = true end
-        end
-    end
-
+    resetVehiclePhysics()
     updateStatus("Patrullaje detenido. Físicas restauradas.")
 end
 
--- INICIAR: VA AL PUNTO 1 (CON DESATASCO), ESPERA 5s Y RECORRE
+-- INICIAR: VA AL PUNTO 1, ESPERA 5s Y RECORRE
 local function startPatrol()
     if #Waypoints < 2 then
         Fluent:Notify({ Title = "Sin Puntos", Content = "Carga o graba puntos primero.", Duration = 3 })
@@ -403,16 +417,11 @@ local function startPatrol()
 
     stopPatrol()
     Config.PatrolRunning = true
-    ConsecutiveSkips = 0
 
     PatrolThread = task.spawn(function()
-        -- 1. Ir al Punto 1 (Base) con protección
+        -- 1. Ir al Punto 1 (Base)
         updateStatus("Iniciando: Yendo al Punto 1...")
-        local reachedP1 = moveToPointWithRetry(Waypoints[1], Waypoints[1])
-        if not reachedP1 then
-            performSafeUnstuck(Waypoints[1])
-            moveToPointWithRetry(Waypoints[1], Waypoints[1])
-        end
+        moveToPointWithRetry(Waypoints[1])
 
         if not Config.PatrolRunning then return end
 
@@ -423,7 +432,7 @@ local function startPatrol()
             task.wait(1)
         end
 
-        -- 3. Recorrer todos los demás puntos continuamente
+        -- 3. Recorrer todos los puntos continuamente
         while Config.PatrolRunning do
             for i = 2, #Waypoints do
                 if not Config.PatrolRunning then break end
@@ -439,18 +448,7 @@ local function startPatrol()
                         if d and s > Config.ReturnEarlySeconds then break end
 
                         updateStatus(string.format("Retorno nocturno: Nodo [%d / 1]", backIdx))
-                        local safePrev = Waypoints[math.min(#Waypoints, backIdx + 1)]
-                        local reachedBack = moveToPointWithRetry(Waypoints[backIdx], safePrev)
-
-                        if not reachedBack then
-                            ConsecutiveSkips = ConsecutiveSkips + 1
-                            if ConsecutiveSkips >= 2 then
-                                performSafeUnstuck(safePrev)
-                                ConsecutiveSkips = 0
-                            end
-                        else
-                            ConsecutiveSkips = 0
-                        end
+                        moveToPointWithRetry(Waypoints[backIdx])
                     end
 
                     -- Esperar amanecer en el Punto 1
@@ -468,18 +466,7 @@ local function startPatrol()
 
                 -- Avanzar al siguiente punto
                 updateStatus(string.format("Caminando: Punto [%d / %d]", i, #Waypoints))
-                local prevPos = Waypoints[i - 1]
-                local reached = moveToPointWithRetry(Waypoints[i], prevPos)
-
-                if not reached then
-                    ConsecutiveSkips = ConsecutiveSkips + 1
-                    if ConsecutiveSkips >= 2 then
-                        performSafeUnstuck(prevPos)
-                        ConsecutiveSkips = 0
-                    end
-                else
-                    ConsecutiveSkips = 0
-                end
+                moveToPointWithRetry(Waypoints[i])
             end
 
             -- Al completar toda la ruta, vuelve en reversa al Punto 1
@@ -487,17 +474,7 @@ local function startPatrol()
                 updateStatus("Fin de ruta. Regresando en reversa a Punto 1...")
                 for backIdx = #Waypoints - 1, 1, -1 do
                     if not Config.PatrolRunning then break end
-                    local safePrev = Waypoints[math.min(#Waypoints, backIdx + 1)]
-                    local reachedBack = moveToPointWithRetry(Waypoints[backIdx], safePrev)
-                    if not reachedBack then
-                        ConsecutiveSkips = ConsecutiveSkips + 1
-                        if ConsecutiveSkips >= 2 then
-                            performSafeUnstuck(safePrev)
-                            ConsecutiveSkips = 0
-                        end
-                    else
-                        ConsecutiveSkips = 0
-                    end
+                    moveToPointWithRetry(Waypoints[backIdx])
                 end
                 task.wait(1)
             end
@@ -518,9 +495,17 @@ Tabs.Main:AddButton({
 
 Tabs.Main:AddButton({
     Title = "⏹ DETENER PATRULLAJE",
-    Description = "Cancela todo y frena al muñeco/auto de inmediato",
+    Description = "Cancela todo y normaliza las físicas de inmediato",
     Callback = function()
         stopPatrol()
+    end
+})
+
+Tabs.Main:AddButton({
+    Title = "🔧 DESBUGEAR AUTO (Reset Físicas)",
+    Description = "Frena el auto en seco, elimina cualquier fuerza y lo asienta en el suelo",
+    Callback = function()
+        resetVehiclePhysics()
     end
 })
 
@@ -531,7 +516,34 @@ Tabs.Main:AddToggle("IgnoreDayNightToggle", {
     Callback = function(Value) Config.IgnoreDayNight = Value end
 })
 
--- PESTAÑA 2: GRABADOR
+-- PESTAÑA 2: CONTROL Y RESCATE DE VEHÍCULO
+Tabs.Vehicle:AddSection("Herramientas de Emergencia")
+
+Tabs.Vehicle:AddButton({
+    Title = "🚨 RESCATAR AUTO PERDIDO",
+    Description = "Extrae el auto del cielo o del fondo de la tierra y te sienta adentro a salvo",
+    Callback = function()
+        rescueLostCar()
+    end
+})
+
+Tabs.Vehicle:AddButton({
+    Title = "🔧 Desbugear Auto / Frenar en Seco",
+    Callback = function()
+        resetVehiclePhysics()
+    end
+})
+
+Tabs.Vehicle:AddSlider("CarSpeedSlider", {
+    Title = "Fuerza de empuje del auto",
+    Default = 80,
+    Min = 30,
+    Max = 150,
+    Rounding = 0,
+    Callback = function(Value) Config.CarSpeed = Value end
+})
+
+-- PESTAÑA 3: GRABADOR
 Tabs.Recorder:AddSection("Grabado de Coordenadas")
 
 Tabs.Recorder:AddToggle("AutoRecordToggle", {
@@ -586,7 +598,7 @@ Tabs.Recorder:AddToggle("ShowMarkersToggle", {
     end
 })
 
--- PESTAÑA 3: IMPORTAR / EXPORTAR
+-- PESTAÑA 4: IMPORTAR / EXPORTAR
 Tabs.Port:AddSection("Copia de Seguridad JSON")
 
 Tabs.Port:AddButton({
@@ -641,23 +653,16 @@ Tabs.Port:AddButton({
     end
 })
 
--- PESTAÑA 4: AJUSTES
-Tabs.Settings:AddSection("Anti-Atasco Seguro y Vehículo")
+-- PESTAÑA 5: AJUSTES
+Tabs.Settings:AddSection("Horarios")
 
-Tabs.Settings:AddToggle("UnstuckToggle", {
-    Title = "Auto-Desatasco con Pausa (3.5s)",
-    Description = "Estabiliza el auto 3.5s, eleva suavemente y protege la suspensión",
-    Default = true,
-    Callback = function(Value) Config.UnstuckEnabled = Value end
-})
-
-Tabs.Settings:AddSlider("CarSpeedSlider", {
-    Title = "Fuerza de empuje del auto",
-    Default = 80,
-    Min = 30,
-    Max = 150,
+Tabs.Settings:AddSlider("ReturnEarlySlider", {
+    Title = "Segundos de anticipación antes de noche",
+    Default = 15,
+    Min = 5,
+    Max = 45,
     Rounding = 0,
-    Callback = function(Value) Config.CarSpeed = Value end
+    Callback = function(Value) Config.ReturnEarlySeconds = Value end
 })
 
 -- BOTÓN FLOTANTE CÍRCULAR (Y = 0.40)
@@ -710,7 +715,7 @@ end)
 
 Fluent:Notify({
     Title = "MAP PATROL HUB LISTO",
-    Content = "Pausa de 3.5s y suspensión protegida configuradas.",
+    Content = "Sin bugs de suspensión. Rescate de auto y desbugeo activos.",
     Duration = 4
 })
 
