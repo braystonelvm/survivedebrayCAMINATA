@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - 4 INTENTOS, RETORNO EN REVERSA Y DESATASCO CON NOCLIP 1s
+-- MAP PATROL HUB - 4 INTENTOS LARGOS, RETORNO PROTEGIDO Y DESATASCO TOTAL
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -26,8 +26,8 @@ local Config = {
     IgnoreDayNight = false,
     ReturnEarlySeconds = 15,
 
-    -- Desatasco inteligente
-    UnstuckFlyEnabled = true      -- Toggle para el impulso arriba + noclip 1s
+    -- Desatasco inteligente (Elevación + Noclip 1s)
+    UnstuckFlyEnabled = true
 }
 
 local Waypoints = {}
@@ -138,46 +138,18 @@ task.spawn(function()
     end
 end)
 
--- MANIOBRA EVASIVA LATERAL (CADA VEZ QUE SE CHOQUE)
-local function evasiveManeuver(attempt)
-    local root = getRootPart()
-    local car, seat = getCurrentVehicle()
-    local controlledPart = seat or root
-    if not controlledPart then return end
-
-    local cf = controlledPart.CFrame
-    -- Intento 1 y 3: Derecha | Intento 2 y 4: Izquierda
-    local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
-
-    if car and seat then
-        seat.Throttle = -1
-        seat.AssemblyLinearVelocity = (-cf.LookVector * 40) + (sideDir * 30)
-        task.wait(0.35)
-        seat.Throttle = 1
-        seat.AssemblyLinearVelocity = (sideDir * 35) + Vector3.new(0, 10, 0)
-        task.wait(0.25)
-    else
-        local hum = getHumanoid()
-        if hum then
-            hum.Jump = true
-            controlledPart.AssemblyLinearVelocity = (-cf.LookVector * 25) + (sideDir * 25)
-            task.wait(0.3)
-        end
-    end
-end
-
--- SISTEMA DE DESATASCO (SUBIDA PREVENTIVA + NOCLIP 1s)
+-- SISTEMA DE DESATASCO (SUBIDA PREVENTIVA AÉREA + NOCLIP 1 SEGUNDO)
 local function performUnstuckManeuver()
     if not Config.UnstuckFlyEnabled then return end
-    updateStatus("⚠️ Atasco detectado: Elevando auto y Noclip 1s...")
+    updateStatus("⚠️ Desatasco: Elevando auto y Noclip 1s para salir de obstáculos...")
 
     local car, seat = getCurrentVehicle()
     local root = getRootPart()
     local controlledPart = seat or root
     if not controlledPart then return end
 
-    -- 1. Impulso hacia arriba primero (evita hundirse al activar noclip)
-    controlledPart.AssemblyLinearVelocity = Vector3.new(0, 50, 0)
+    -- 1. Impulso vertical hacia arriba primero para no hundirse
+    controlledPart.AssemblyLinearVelocity = Vector3.new(0, 55, 0)
     task.wait(0.15)
 
     -- 2. Activar Noclip durante 1 segundo exacto
@@ -195,11 +167,12 @@ local function performUnstuckManeuver()
         end
     end)
 
-    -- Mantener el vehículo flotando y avanzando mientras atraviesa el obstáculo
-    controlledPart.AssemblyLinearVelocity = Vector3.new(controlledPart.AssemblyLinearVelocity.X, 20, controlledPart.AssemblyLinearVelocity.Z)
+    -- Empuje hacia adelante y manteniendo altura
+    local forwardDir = controlledPart.CFrame.LookVector
+    controlledPart.AssemblyLinearVelocity = (forwardDir * 45) + Vector3.new(0, 25, 0)
     task.wait(1.0)
 
-    -- 3. Desactivar Noclip y restaurar físicas
+    -- 3. Desactivar Noclip y restaurar colisiones normales
     noclipConn:Disconnect()
     task.wait(0.1)
 
@@ -211,6 +184,57 @@ local function performUnstuckManeuver()
     if char then
         for _, p in ipairs(char:GetDescendants()) do
             if p:IsA("BasePart") then p.CanCollide = true end
+        end
+    end
+end
+
+-- MANIOBRAS DE ESCAPE MÁS LARGAS Y CON MAYOR DISTANCIA
+local function evasiveManeuver(attempt)
+    local root = getRootPart()
+    local car, seat = getCurrentVehicle()
+    local controlledPart = seat or root
+    if not controlledPart then return end
+
+    local cf = controlledPart.CFrame
+
+    if car and seat then
+        if attempt == 1 then
+            -- Intento 1: Retroceso largo hacia la derecha
+            seat.Throttle = -1
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) + (cf.RightVector * 40)
+            task.wait(0.65)
+            seat.Throttle = 1
+            seat.AssemblyLinearVelocity = (cf.RightVector * 45) + Vector3.new(0, 10, 0)
+            task.wait(0.55)
+        elseif attempt == 2 then
+            -- Intento 2: Retroceso largo hacia la izquierda
+            seat.Throttle = -1
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) - (cf.RightVector * 40)
+            task.wait(0.65)
+            seat.Throttle = 1
+            seat.AssemblyLinearVelocity = (-cf.RightVector * 45) + Vector3.new(0, 10, 0)
+            task.wait(0.55)
+        elseif attempt == 3 then
+            -- Intento 3: Retroceso recto largo a máxima potencia con pequeño salto
+            seat.Throttle = -1
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 65) + Vector3.new(0, 15, 0)
+            task.wait(0.8)
+            seat.Throttle = 1
+            task.wait(0.3)
+        elseif attempt >= 4 then
+            -- Intento 4: Si sigue atascado dentro de una casa o pared, usar elevación + noclip directo
+            performUnstuckManeuver()
+        end
+    else
+        local hum = getHumanoid()
+        if hum then
+            hum.Jump = true
+            local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
+            controlledPart.AssemblyLinearVelocity = (-cf.LookVector * 35) + (sideDir * 35)
+            task.wait(0.6)
+            if attempt >= 4 then
+                performUnstuckManeuver()
+            end
         end
     end
 end
@@ -256,7 +280,7 @@ local function walkOrDriveTo(targetPos, maxTime)
     return reached
 end
 
--- INTENTAR HASTA 4 VECES CON ESQUIVE LATERAL
+-- INTENTAR HASTA 4 VECES CON ESQUIVES LARGOS
 local function moveToPointWithRetry(targetPos)
     for attempt = 1, 4 do
         if not Config.PatrolRunning then return false end
@@ -269,7 +293,7 @@ local function moveToPointWithRetry(targetPos)
             end
         end
     end
-    return false -- Si falló los 4 intentos, se omite
+    return false
 end
 
 -- CREACIÓN DE MARCADORES (0 LAG)
@@ -321,7 +345,7 @@ local function stopPatrol()
     updateStatus("Patrullaje cancelado y detenido por completo.")
 end
 
--- INICIAR: VA AL PUNTO 1, ESPERA 5s Y RECORRE
+-- INICIAR: VA AL PUNTO 1 (CON DESATASCO), ESPERA 5s Y RECORRE
 local function startPatrol()
     if #Waypoints < 2 then
         Fluent:Notify({ Title = "Sin Puntos", Content = "Carga o graba puntos primero.", Duration = 3 })
@@ -333,9 +357,13 @@ local function startPatrol()
     ConsecutiveSkips = 0
 
     PatrolThread = task.spawn(function()
-        -- 1. Ir al Punto 1 (Base)
+        -- 1. Ir al Punto 1 (Base) con protección de desatasco aéreo
         updateStatus("Iniciando: Yendo al Punto 1...")
-        moveToPointWithRetry(Waypoints[1])
+        local reachedP1 = moveToPointWithRetry(Waypoints[1])
+        if not reachedP1 then
+            performUnstuckManeuver()
+            moveToPointWithRetry(Waypoints[1])
+        end
 
         if not Config.PatrolRunning then return end
 
@@ -351,7 +379,7 @@ local function startPatrol()
             for i = 2, #Waypoints do
                 if not Config.PatrolRunning then break end
 
-                -- Chequeo de Noche (15s antes de la noche: Regreso en reversa por la ruta)
+                -- Chequeo de Noche (15s antes de la noche: Regreso en reversa por la ruta con desatasco)
                 local isDay, secsLeft = scanGameDayNight()
                 if (not isDay or secsLeft <= Config.ReturnEarlySeconds) and not Config.IgnoreDayNight then
                     updateStatus(string.format("⚠️ Anocheciendo (%ds): Regresando en reversa por la ruta...", secsLeft))
@@ -361,13 +389,31 @@ local function startPatrol()
                         if not Config.PatrolRunning then break end
                         local d, s = scanGameDayNight()
                         if d and s > Config.ReturnEarlySeconds then
-                            break -- Si amanece antes de llegar, continúa el avance
+                            break
                         end
                         updateStatus(string.format("Retorno nocturno: Nodo [%d / 1]", backIdx))
-                        moveToPointWithRetry(Waypoints[backIdx])
+                        local reachedBack = moveToPointWithRetry(Waypoints[backIdx])
+                        
+                        -- Si se traba regresando de noche por una casa o muro, elevar y noclip 1s
+                        if not reachedBack then
+                            ConsecutiveSkips = ConsecutiveSkips + 1
+                            if ConsecutiveSkips >= 2 then
+                                performUnstuckManeuver()
+                                ConsecutiveSkips = 0
+                            end
+                        else
+                            ConsecutiveSkips = 0
+                        end
                     end
 
-                    -- Esperar amanecer en el Punto 1
+                    -- Asegurar llegada final al Punto 1
+                    local atBase = moveToPointWithRetry(Waypoints[1])
+                    if not atBase then
+                        performUnstuckManeuver()
+                        moveToPointWithRetry(Waypoints[1])
+                    end
+
+                    -- Esperar amanecer resguardado en el Punto 1
                     while Config.PatrolRunning do
                         local d, s = scanGameDayNight()
                         if d and s > Config.ReturnEarlySeconds then break end
@@ -384,7 +430,7 @@ local function startPatrol()
                 updateStatus(string.format("Caminando: Punto [%d / %d]", i, #Waypoints))
                 local reached = moveToPointWithRetry(Waypoints[i])
 
-                -- Detección de omisiones para aplicar Auto-Desatasco
+                -- Detección de omisiones para aplicar Auto-Desatasco (Fly + Noclip 1s)
                 if not reached then
                     ConsecutiveSkips = ConsecutiveSkips + 1
                     if ConsecutiveSkips >= 2 then
@@ -401,7 +447,16 @@ local function startPatrol()
                 updateStatus("Fin de ruta. Regresando en reversa a Punto 1...")
                 for backIdx = #Waypoints - 1, 1, -1 do
                     if not Config.PatrolRunning then break end
-                    moveToPointWithRetry(Waypoints[backIdx])
+                    local reachedBack = moveToPointWithRetry(Waypoints[backIdx])
+                    if not reachedBack then
+                        ConsecutiveSkips = ConsecutiveSkips + 1
+                        if ConsecutiveSkips >= 2 then
+                            performUnstuckManeuver()
+                            ConsecutiveSkips = 0
+                        end
+                    else
+                        ConsecutiveSkips = 0
+                    end
                 end
                 task.wait(1)
             end
@@ -550,7 +605,7 @@ Tabs.Settings:AddSection("Anti-Atasco y Vehículo")
 
 Tabs.Settings:AddToggle("UnstuckFlyToggle", {
     Title = "Auto-Desatasco (Subida + Noclip 1s)",
-    Description = "Si omite 2 puntos seguidos por atasco, eleva el auto y activa noclip 1 segundo",
+    Description = "Eleva el auto y activa noclip 1s si se mete dentro de una casa o se traba",
     Default = true,
     Callback = function(Value) Config.UnstuckFlyEnabled = Value end
 })
@@ -614,7 +669,7 @@ end)
 
 Fluent:Notify({
     Title = "MAP PATROL HUB LISTO",
-    Content = "4 intentos, retorno inverso y desatasco de 1s activos.",
+    Content = "Maniobras de escape largas y desatasco aéreo activo.",
     Duration = 4
 })
 
