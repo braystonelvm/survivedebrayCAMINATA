@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - DESPLAZAMIENTO OMNIDIRECCIONAL 360° (MODO LLANTAS HUNDIDAS)
+-- MAP PATROL HUB - DESPLAZAMIENTO FÍSICO POR HEARTBEAT (LLANTAS HUNDIDAS 360°)
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -174,7 +174,6 @@ local function rescueLostCar()
     local targetPos = (Waypoints and #Waypoints > 0 and Waypoints[1]) or Vector3.new(root.Position.X, 4.0, root.Position.Z)
     local safeCF = CFrame.new(targetPos.X, math.max(targetPos.Y, 3.5) + 2.5, targetPos.Z)
 
-    -- 1. Detener caídas y limpiar físicas del auto
     for _, p in ipairs(car:GetDescendants()) do
         if p:IsA("BasePart") then
             p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
@@ -184,13 +183,11 @@ local function rescueLostCar()
         end
     end
 
-    -- 2. Teletransportar el auto a la superficie
     pcall(function()
         car:PivotTo(safeCF)
     end)
     task.wait(0.1)
 
-    -- 3. Teletransportar al jugador y sentarlo adentro
     root.CFrame = safeCF + Vector3.new(0, 3, 0)
     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 
@@ -246,7 +243,7 @@ task.spawn(function()
         task.wait(0.5)
         local isDay, secs = scanGameDayNight()
         local car = getCurrentVehicle()
-        local modeText = car and "🚗 EN VEHÍCULO (360°)" or "🏃 A PIE"
+        local modeText = car and "🚗 EN VEHÍCULO" or "🏃 A PIE"
 
         if Config.IgnoreDayNight then
             CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: ☀️ DÍA FORZADO (24h)", modeText))
@@ -260,103 +257,59 @@ end)
 -- MANIOBRAS DE DESATASCO
 local function evasiveManeuver(attempt, targetPos)
     local root = getRootPart()
-    local car, seat = getCurrentVehicle()
-    local controlledPart = seat or root
-    if not controlledPart then return end
+    if not root then return end
 
-    local cf = controlledPart.CFrame
-
-    if car and seat then
-        if attempt == 1 then
-            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) + (cf.RightVector * 40)
-            task.wait(0.5)
-        elseif attempt == 2 then
-            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) - (cf.RightVector * 40)
-            task.wait(0.5)
-        elseif attempt == 3 then
-            seat.AssemblyLinearVelocity = (-cf.LookVector * 65) + Vector3.new(0, 8, 0)
-            task.wait(0.5)
-        elseif attempt >= 4 and targetPos then
-            updateStatus("⚠️ Traspasando obstáculo hacia el nodo...")
-            seat.AssemblyLinearVelocity = Vector3.zero
-            seat.AssemblyAngularVelocity = Vector3.zero
-            pcall(function()
-                car:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 1.5, targetPos.Z))
-            end)
-            task.wait(0.3)
+    local cf = root.CFrame
+    if attempt == 1 then
+        root.AssemblyLinearVelocity = (-cf.LookVector * 50) + (cf.RightVector * 35)
+        task.wait(0.4)
+    elseif attempt == 2 then
+        root.AssemblyLinearVelocity = (-cf.LookVector * 50) - (cf.RightVector * 35)
+        task.wait(0.4)
+    elseif attempt == 3 then
+        root.AssemblyLinearVelocity = (-cf.LookVector * 60) + Vector3.new(0, 8, 0)
+        task.wait(0.4)
+    elseif attempt >= 4 and targetPos then
+        updateStatus("⚠️ Traspasando obstáculo hacia el nodo...")
+        root.AssemblyLinearVelocity = Vector3.zero
+        local car = getCurrentVehicle()
+        if car then
+            pcall(function() car:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z)) end)
+        else
+            root.CFrame = CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z)
         end
-    else
-        local hum = getHumanoid()
-        if hum then
-            hum.Jump = true
-            local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
-            controlledPart.AssemblyLinearVelocity = (-cf.LookVector * 30) + (sideDir * 30)
-            task.wait(0.4)
-            if attempt >= 4 and targetPos and root then
-                root.CFrame = CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z)
-                root.AssemblyLinearVelocity = Vector3.zero
-            end
-        end
+        task.wait(0.3)
     end
 end
 
 -- ==============================================================================
--- DESPLAZAMIENTO OMNIDIRECCIONAL EN 360° (AUTO HUNDIDO O A PIE)
+-- DESPLAZAMIENTO REPLICADO DEL SCRIPT DE REFERENCIA (0% LAG / 360 GRADOS)
 -- ==============================================================================
 local function walkOrDriveTo(targetPos, maxTime)
     local startT = tick()
     local reached = false
 
     while Config.PatrolRunning and (tick() - startT < maxTime) do
+        -- Sincronización continua en cada ciclo físico
+        RunService.Heartbeat:Wait()
+
         local root = getRootPart()
         local hum = getHumanoid()
-        local car, seat = getCurrentVehicle()
-
         if not root or not hum or hum.Health <= 0 then break end
 
-        -- Punto de referencia: asiento si está dentro del auto, raíz si está a pie
-        local movingPart = seat or root
-        local myPos = movingPart.Position
+        -- Vector horizontal puro hacia el punto (idéntico al script de referencia)
+        local direction = (targetPos - root.Position)
+        local horizontalDir = Vector3.new(direction.X, 0, direction.Z)
 
-        -- Vector horizontal puro (360 grados exactos)
-        local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
-        local dist = delta.Magnitude
-
-        local tolerance = seat and 6.5 or 3.8
-        if dist <= tolerance then
+        if horizontalDir.Magnitude <= 3.8 then
             reached = true
             break
         end
 
-        local dir = delta.Unit
-
-        -- CASO 1: DENTRO DEL AUTO (MODO LLANTAS HUNDIDAS / DESPLAZAMIENTO 360°)
-        if seat then
-            -- Orientar suavemente hacia el nodo
-            if dist > 1.2 and car then
-                pcall(function()
-                    local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
-                    car:PivotTo(CFrame.lookAt(myPos, lookTarget))
-                end)
-            end
-
-            -- Empuje directo horizontal en 360° como si caminara
-            local curVY = seat.AssemblyLinearVelocity.Y
-            if curVY < -25 then curVY = 0 end -- Evitar caer por el mapa
-
-            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, curVY, dir.Z * Config.CarSpeed)
-            seat.AssemblyAngularVelocity = Vector3.zero
-
-            if seat:IsA("VehicleSeat") then
-                seat.Throttle = 1
-            end
-
-        -- CASO 2: A PIE (SIN AUTO)
-        else
-            hum:MoveTo(targetPos)
-        end
-
-        task.wait(0.08)
+        -- Aplica la velocidad física sobre el HumanoidRootPart.
+        -- Esto empuja el cuerpo y arrastra el chasis del auto en 360° sin trabas de teclado.
+        local targetVelocity = horizontalDir.Unit * Config.CarSpeed
+        root.AssemblyLinearVelocity = Vector3.new(targetVelocity.X, root.AssemblyLinearVelocity.Y, targetVelocity.Z)
     end
 
     return reached
@@ -547,9 +500,9 @@ Tabs.Vehicle:AddButton({
 })
 
 Tabs.Vehicle:AddSlider("CarSpeedSlider", {
-    Title = "Velocidad de Desplazamiento 360°",
+    Title = "Velocidad de Movimiento",
     Default = 80,
-    Min = 30,
+    Min = 20,
     Max = 150,
     Rounding = 0,
     Callback = function(Value) Config.CarSpeed = Value end
@@ -727,7 +680,7 @@ end)
 
 Fluent:Notify({
     Title = "MAP PATROL HUB LISTO",
-    Content = "Modo 360° omnidireccional activo. Compatible con llantas hundidas.",
+    Content = "Motor de movimiento configurado por Heartbeat directo.",
     Duration = 4
 })
 
