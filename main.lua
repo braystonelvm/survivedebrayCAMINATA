@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - DESPLAZAMIENTO FÍSICO POR HEARTBEAT (LLANTAS HUNDIDAS 360°)
+-- MAP PATROL HUB - MULTIMODO DE MOVIMIENTO (5 MOTORES FÍSICOS SELECCIONABLES)
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -24,7 +24,8 @@ local Config = {
     ShowMarkers = true,
     CarSpeed = 80,
     IgnoreDayNight = false,
-    ReturnEarlySeconds = 15
+    ReturnEarlySeconds = 15,
+    MoveMode = "1. Zombie Hub (Root Velocity)" -- Modo activo
 }
 
 local Waypoints = {}
@@ -35,10 +36,10 @@ local LastKnownCar = nil
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
-    Title = "MAP PATROL HUB | 500+ NODOS",
+    Title = "MAP PATROL HUB | MULTIMODO",
     SubTitle = "Sobrevive al Apocalipsis",
     TabWidth = 160,
-    Size = UDim2.fromOffset(590, 520),
+    Size = UDim2.fromOffset(590, 540),
     Acrylic = true,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -137,14 +138,14 @@ local function resetVehiclePhysics()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         for _, p in ipairs(lp.Character:GetDescendants()) do
-            if p:IsA("BodyMover") then p:Destroy() end
+            if p:IsA("BodyMover") or p:IsA("LinearVelocity") then p:Destroy() end
         end
     end
 
     Fluent:Notify({ Title = "Auto Normalizado", Content = "Físicas y velocidades reseteadas.", Duration = 2.5 })
 end
 
--- RESCATAR AUTO PERDIDO (DEL CIELO O BAJO TIERRA)
+-- RESCATAR AUTO PERDIDO
 local function rescueLostCar()
     local car = LastKnownCar
     if not car or not car.Parent then
@@ -178,14 +179,12 @@ local function rescueLostCar()
         if p:IsA("BasePart") then
             p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        elseif p:IsA("BodyMover") then
+        elseif p:IsA("BodyMover") or p:IsA("LinearVelocity") then
             p:Destroy()
         end
     end
 
-    pcall(function()
-        car:PivotTo(safeCF)
-    end)
+    pcall(function() car:PivotTo(safeCF) end)
     task.wait(0.1)
 
     root.CFrame = safeCF + Vector3.new(0, 3, 0)
@@ -207,9 +206,7 @@ end
 
 -- DETECTOR DE DÍA / NOCHE
 local function scanGameDayNight()
-    if Config.IgnoreDayNight then
-        return true, 999
-    end
+    if Config.IgnoreDayNight then return true, 999 end
 
     local detectedDay = true
     local remainingSecs = 999
@@ -219,9 +216,7 @@ local function scanGameDayNight()
         for _, lbl in ipairs(pGui:GetDescendants()) do
             if lbl:IsA("TextLabel") and lbl.Visible then
                 local txt = lbl.Text:lower()
-                if txt:find("noche") or txt:find("night") then
-                    detectedDay = false
-                end
+                if txt:find("noche") or txt:find("night") then detectedDay = false end
                 local m, s = txt:match("(%d+):(%d+)")
                 if m and s and not txt:find("revivir") and not txt:find("espera") then
                     remainingSecs = (tonumber(m) * 60) + tonumber(s)
@@ -231,9 +226,7 @@ local function scanGameDayNight()
     end
 
     local clock = Lighting.ClockTime
-    if clock < 5.8 or clock > 18.2 then
-        detectedDay = false
-    end
+    if clock < 5.8 or clock > 18.2 then detectedDay = false end
 
     return detectedDay, remainingSecs
 end
@@ -270,7 +263,7 @@ local function evasiveManeuver(attempt, targetPos)
         root.AssemblyLinearVelocity = (-cf.LookVector * 60) + Vector3.new(0, 8, 0)
         task.wait(0.4)
     elseif attempt >= 4 and targetPos then
-        updateStatus("⚠️ Traspasando obstáculo hacia el nodo...")
+        updateStatus("⚠️ Desatascando hacia el nodo...")
         root.AssemblyLinearVelocity = Vector3.zero
         local car = getCurrentVehicle()
         if car then
@@ -283,43 +276,113 @@ local function evasiveManeuver(attempt, targetPos)
 end
 
 -- ==============================================================================
--- DESPLAZAMIENTO REPLICADO DEL SCRIPT DE REFERENCIA (0% LAG / 360 GRADOS)
+-- MOTOR DE MOVIMIENTO MULTIMODO (EJECUCIÓN POR HEARTBEAT)
 -- ==============================================================================
 local function walkOrDriveTo(targetPos, maxTime)
     local startT = tick()
     local reached = false
 
     while Config.PatrolRunning and (tick() - startT < maxTime) do
-        -- Sincronización continua en cada ciclo físico
-        RunService.Heartbeat:Wait()
+        local dt = RunService.Heartbeat:Wait()
 
         local root = getRootPart()
         local hum = getHumanoid()
+        local car, seat = getCurrentVehicle()
+
         if not root or not hum or hum.Health <= 0 then break end
 
-        -- Vector horizontal puro hacia el punto (idéntico al script de referencia)
-        local direction = (targetPos - root.Position)
+        -- Punto de referencia
+        local myPos = (seat and seat.Position) or root.Position
+        local direction = (targetPos - myPos)
         local horizontalDir = Vector3.new(direction.X, 0, direction.Z)
 
-        if horizontalDir.Magnitude <= 3.8 then
+        if horizontalDir.Magnitude <= 4.0 then
             reached = true
             break
         end
 
-        -- Aplica la velocidad física sobre el HumanoidRootPart.
-        -- Esto empuja el cuerpo y arrastra el chasis del auto en 360° sin trabas de teclado.
-        local targetVelocity = horizontalDir.Unit * Config.CarSpeed
-        root.AssemblyLinearVelocity = Vector3.new(targetVelocity.X, root.AssemblyLinearVelocity.Y, targetVelocity.Z)
+        local dirUnit = horizontalDir.Unit
+        local speed = Config.CarSpeed
+        local targetVel = dirUnit * speed
+
+        -- ================== SELECCIÓN DE MOTOR FÍSICO ==================
+
+        -- MODO 1: ZOMBIE HUB EXACTO (VELOCIDAD FÍSICA DIRECTA EN ROOT SIN PIVOTTO)
+        if Config.MoveMode:find("1") then
+            root.AssemblyLinearVelocity = Vector3.new(targetVel.X, root.AssemblyLinearVelocity.Y, targetVel.Z)
+
+        -- MODO 2: VELOCIDAD DIRECTA EN SEAT / RUEDAS (HEREDA EL CHASSIS)
+        elseif Config.MoveMode:find("2") then
+            local mainSeat = seat or root
+            mainSeat.AssemblyLinearVelocity = Vector3.new(targetVel.X, mainSeat.AssemblyLinearVelocity.Y, targetVel.Z)
+            if seat and seat:IsA("VehicleSeat") then seat.Throttle = 1 end
+
+        -- MODO 3: BODYVELOCITY (FUERZA BRUTA INFINITA ANTI-FRICCIÓN)
+        elseif Config.MoveMode:find("3") then
+            local mainPart = seat or root
+            local bv = mainPart:FindFirstChild("PatrolBV")
+            if not bv then
+                bv = Instance.new("BodyVelocity")
+                bv.Name = "PatrolBV"
+                bv.MaxForce = Vector3.new(1e8, 0, 1e8) -- Bloquea eje Y para no volar ni hundirse
+                bv.Parent = mainPart
+            end
+            bv.Velocity = Vector3.new(targetVel.X, 0, targetVel.Z)
+
+        -- MODO 4: LINEARVELOCITY (CONSTRAINT DE FÍSICA MODERNA ROBLOX)
+        elseif Config.MoveMode:find("4") then
+            local mainPart = seat or root
+            local att = mainPart:FindFirstChild("PatrolAtt")
+            if not att then
+                att = Instance.new("Attachment")
+                att.Name = "PatrolAtt"
+                att.Parent = mainPart
+            end
+            local lv = mainPart:FindFirstChild("PatrolLV")
+            if not lv then
+                lv = Instance.new("LinearVelocity")
+                lv.Name = "PatrolLV"
+                lv.Attachment0 = att
+                lv.MaxForce = 1e9
+                lv.RelativeTo = Enum.ActuatorRelativeTo.World
+                lv.Parent = mainPart
+            end
+            lv.VectorVelocity = Vector3.new(targetVel.X, 0, targetVel.Z)
+
+        -- MODO 5: CFRAME STEP (DESPLAZAMIENTO PASO A PASO / IGNORA SUSPENSIÓN)
+        elseif Config.MoveMode:find("5") then
+            local stepDist = speed * dt
+            local moveOffset = dirUnit * math.min(stepDist, horizontalDir.Magnitude)
+            if car then
+                pcall(function() car:PivotTo(car:GetPivot() + moveOffset) end)
+            else
+                root.CFrame = root.CFrame + moveOffset
+            end
+        end
+    end
+
+    -- LIMPIEZA DE OBJETOS FÍSICOS TEMPORALES AL SALIR DEL NODO
+    local rootPart = getRootPart()
+    local _, seatPart = getCurrentVehicle()
+    for _, part in ipairs({rootPart, seatPart}) do
+        if part then
+            local bv = part:FindFirstChild("PatrolBV")
+            if bv then bv:Destroy() end
+            local lv = part:FindFirstChild("PatrolLV")
+            if lv then lv:Destroy() end
+            local att = part:FindFirstChild("PatrolAtt")
+            if att then att:Destroy() end
+        end
     end
 
     return reached
 end
 
--- INTENTAR HASTA 4 VECES CON DESATASCO
+-- INTENTAR HASTA 4 VECES
 local function moveToPointWithRetry(targetPos)
     for attempt = 1, 4 do
         if not Config.PatrolRunning then return false end
-        local success = walkOrDriveTo(targetPos, 3.8)
+        local success = walkOrDriveTo(targetPos, 4.0)
         if success then
             return true
         else
@@ -450,6 +513,22 @@ end
 -- PESTAÑA 1: PATRULLAJE
 Tabs.Main:AddSection("Control de Ruta")
 
+Tabs.Main:AddDropdown("MoveModeDropdown", {
+    Title = "Modo de Movimiento",
+    Values = {
+        "1. Zombie Hub (Root Velocity)",
+        "2. Chasis / Seat Velocity",
+        "3. BodyVelocity (Fuerza Bruta)",
+        "4. LinearVelocity (Constraint)",
+        "5. CFrame Step (Micro-Paso 360°)"
+    },
+    Default = "1. Zombie Hub (Root Velocity)",
+    Callback = function(Value)
+        Config.MoveMode = Value
+        Fluent:Notify({ Title = "Modo Cambiado", Content = Value, Duration = 2 })
+    end
+})
+
 Tabs.Main:AddButton({
     Title = "▶ INICIAR PATRULLAJE",
     Description = "Va a Punto 1, espera 5s y recorre todos los puntos en 360°",
@@ -541,147 +620,4 @@ Tabs.Recorder:AddButton({
     end
 })
 
-Tabs.Recorder:AddButton({
-    Title = "Borrar Todos los Puntos",
-    Callback = function()
-        table.clear(Waypoints)
-        MarkersFolder:ClearAllChildren()
-        table.clear(MarkerInstances)
-        LastRecordPos = nil
-        Fluent:Notify({ Title = "Ruta Borrada", Content = "Puntos eliminados.", Duration = 2 })
-    end
-})
-
-Tabs.Recorder:AddToggle("ShowMarkersToggle", {
-    Title = "Mostrar Bolitas Amarillas (Anti-Lag)",
-    Default = true,
-    Callback = function(Value)
-        Config.ShowMarkers = Value
-        for _, m in ipairs(MarkerInstances) do
-            if m and m.Parent then m.Transparency = Value and 0 or 1 end
-        end
-    end
-})
-
--- PESTAÑA 4: IMPORTAR / EXPORTAR
-Tabs.Port:AddSection("Copia de Seguridad JSON")
-
-Tabs.Port:AddButton({
-    Title = "📋 EXPORTAR RUTA (Copiar al Portapapeles)",
-    Callback = function()
-        if #Waypoints == 0 then
-            Fluent:Notify({ Title = "Sin Puntos", Content = "No hay puntos para exportar.", Duration = 2 })
-            return
-        end
-
-        local clean = {}
-        for _, v in ipairs(Waypoints) do
-            table.insert(clean, {math.floor(v.X * 10) / 10, math.floor(v.Y * 10) / 10, math.floor(v.Z * 10) / 10})
-        end
-
-        local json = HttpService:JSONEncode(clean)
-        if setclipboard then setclipboard(json) elseif toclipboard then toclipboard(json) end
-        print("\n[RUTA EXPORTADA - PUNTOS: " .. #Waypoints .. "]:\n" .. json .. "\n")
-        Fluent:Notify({ Title = "¡Copiado!", Content = string.format("%d puntos copiados.", #Waypoints), Duration = 3 })
-    end
-})
-
-local ImportInput = Tabs.Port:AddInput("ImportBox", {
-    Title = "Pegar JSON de Ruta Aquí",
-    Default = "",
-    Placeholder = "Pega aquí las coordenadas...",
-    Numeric = false,
-    Finished = false,
-    Callback = function() end
-})
-
-Tabs.Port:AddButton({
-    Title = "📥 CARGAR RUTA IMPORTADA",
-    Callback = function()
-        local txt = ImportInput.Value
-        if not txt or #txt < 5 then
-            Fluent:Notify({ Title = "Vacío", Content = "Pega el texto primero.", Duration = 2 })
-            return
-        end
-
-        local ok, decoded = pcall(function() return HttpService:JSONDecode(txt) end)
-        if ok and type(decoded) == "table" then
-            table.clear(Waypoints)
-            for _, pt in ipairs(decoded) do
-                table.insert(Waypoints, Vector3.new(pt[1], pt[2], pt[3]))
-            end
-            redrawAllMarkers()
-            Fluent:Notify({ Title = "Ruta Cargada", Content = string.format("Cargados %d puntos.", #Waypoints), Duration = 4 })
-        else
-            Fluent:Notify({ Title = "Error", Content = "Formato de texto inválido.", Duration = 3 })
-        end
-    end
-})
-
--- PESTAÑA 5: AJUSTES
-Tabs.Settings:AddSection("Horarios")
-
-Tabs.Settings:AddSlider("ReturnEarlySlider", {
-    Title = "Segundos de anticipación antes de noche",
-    Default = 15,
-    Min = 5,
-    Max = 45,
-    Rounding = 0,
-    Callback = function(Value) Config.ReturnEarlySeconds = Value end
-})
-
--- BOTÓN FLOTANTE CIRCULAR (Y = 0.40)
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "MapPatrolFloatBtn"
-ScreenGui.ResetOnSpawn = false
-if gethui then
-    ScreenGui.Parent = gethui()
-elseif syn and syn.protect_gui then
-    syn.protect_gui(ScreenGui)
-    ScreenGui.Parent = game:GetService("CoreGui")
-else
-    ScreenGui.Parent = lp:WaitForChild("PlayerGui")
-end
-
-local FloatBtn = Instance.new("ImageButton")
-FloatBtn.Size = UDim2.new(0, 48, 0, 48)
-FloatBtn.Position = UDim2.new(0.04, 0, 0.40, 0)
-FloatBtn.BackgroundColor3 = Color3.fromRGB(255, 190, 0)
-FloatBtn.Image = "rbxassetid://10723415903"
-FloatBtn.Parent = ScreenGui
-
-local UICorner = Instance.new("UICorner")
-UICorner.CornerRadius = UDim.new(1, 0)
-UICorner.Parent = FloatBtn
-
-local isWindowOpen = true
-FloatBtn.MouseButton1Click:Connect(function()
-    isWindowOpen = not isWindowOpen
-    Window.Root.Visible = isWindowOpen
-end)
-
--- BUCLE DE GRABADO
-task.spawn(function()
-    while true do
-        task.wait(0.3)
-        if Config.AutoRecord then
-            local root = getRootPart()
-            if root then
-                local myPos = root.Position
-                if not LastRecordPos or (myPos - LastRecordPos).Magnitude >= Config.StepDist then
-                    LastRecordPos = myPos
-                    table.insert(Waypoints, myPos)
-                    createMarker(myPos, #Waypoints)
-                end
-            end
-        end
-    end
-end)
-
-Fluent:Notify({
-    Title = "MAP PATROL HUB LISTO",
-    Content = "Motor de movimiento configurado por Heartbeat directo.",
-    Duration = 4
-})
-
-Window:SelectTab(1)
+Tabs.
