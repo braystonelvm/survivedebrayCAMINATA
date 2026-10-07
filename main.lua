@@ -1,5 +1,5 @@
 -- ==============================================================================
--- MAP PATROL HUB - MODO EXCLUSIVO A PIE (CAMINATA PURA / CERO AUTOS)
+-- MAP PATROL HUB - DESPLAZAMIENTO OMNIDIRECCIONAL 360° (MODO LLANTAS HUNDIDAS)
 -- ==============================================================================
 
 local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
@@ -22,7 +22,7 @@ local Config = {
     AutoRecord = false,
     StepDist = 30,
     ShowMarkers = true,
-    WalkSpeed = 16,
+    CarSpeed = 80,
     IgnoreDayNight = false,
     ReturnEarlySeconds = 15
 }
@@ -31,13 +31,14 @@ local Waypoints = {}
 local MarkerInstances = {}
 local LastRecordPos = nil
 local PatrolThread = nil
+local LastKnownCar = nil
 
 -- 1. VENTANA PRINCIPAL
 local Window = Fluent:CreateWindow({
-    Title = "MAP PATROL HUB | A PIE",
+    Title = "MAP PATROL HUB | 500+ NODOS",
     SubTitle = "Sobrevive al Apocalipsis",
     TabWidth = 160,
-    Size = UDim2.fromOffset(590, 500),
+    Size = UDim2.fromOffset(590, 520),
     Acrylic = true,
     Theme = "Darker",
     MinimizeKey = Enum.KeyCode.RightControl
@@ -45,6 +46,7 @@ local Window = Fluent:CreateWindow({
 
 local Tabs = {
     Main = Window:AddTab({ Title = "Patrullaje", Icon = "play" }),
+    Vehicle = Window:AddTab({ Title = "Control Auto", Icon = "truck" }),
     Recorder = Window:AddTab({ Title = "Grabador", Icon = "map-pin" }),
     Port = Window:AddTab({ Title = "Import/Export", Icon = "clipboard" }),
     Settings = Window:AddTab({ Title = "Ajustes", Icon = "settings" })
@@ -72,6 +74,138 @@ end
 local function getHumanoid()
     local char = lp.Character
     return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getCurrentVehicle()
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.SeatPart then
+        local seat = hum.SeatPart
+        local carModel = seat:FindFirstAncestorOfClass("Model") or seat.Parent
+        if carModel and carModel:IsA("Model") then
+            LastKnownCar = carModel
+            return carModel, seat
+        end
+        return nil, seat
+    end
+    return nil, nil
+end
+
+-- RASTREADOR EN SEGUNDO PLANO DEL AUTO
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local car = getCurrentVehicle()
+        if car then LastKnownCar = car end
+    end
+end)
+
+-- RESETEAR FÍSICAS Y DESBUGEAR AUTO
+local function resetVehiclePhysics()
+    local car, seat = getCurrentVehicle()
+    if not car and LastKnownCar and LastKnownCar.Parent then
+        car = LastKnownCar
+        seat = car:FindFirstChildWhichIsA("VehicleSeat", true) or car:FindFirstChildWhichIsA("Seat", true)
+    end
+
+    if car then
+        for _, p in ipairs(car:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            elseif p:IsA("BodyMover") or p:IsA("VectorForce") or p:IsA("LinearVelocity") then
+                p:Destroy()
+            end
+        end
+
+        if seat then
+            if seat:IsA("VehicleSeat") then
+                seat.Throttle = 0
+                seat.Steer = 0
+            end
+            local curPos = seat.Position
+            local safeY = math.max(curPos.Y, 3.5)
+            pcall(function()
+                local look = seat.CFrame.LookVector
+                car:PivotTo(CFrame.new(Vector3.new(curPos.X, safeY, curPos.Z), Vector3.new(curPos.X + look.X, safeY, curPos.Z + look.Z)))
+            end)
+        end
+    end
+
+    local root = getRootPart()
+    if root then
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        for _, p in ipairs(lp.Character:GetDescendants()) do
+            if p:IsA("BodyMover") then p:Destroy() end
+        end
+    end
+
+    Fluent:Notify({ Title = "Auto Normalizado", Content = "Físicas y velocidades reseteadas.", Duration = 2.5 })
+end
+
+-- RESCATAR AUTO PERDIDO (DEL CIELO O BAJO TIERRA)
+local function rescueLostCar()
+    local car = LastKnownCar
+    if not car or not car.Parent then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("VehicleSeat") or (obj:IsA("Seat") and obj.Name:lower():find("drive")) then
+                car = obj:FindFirstAncestorOfClass("Model")
+                if car then
+                    LastKnownCar = car
+                    break
+                end
+            end
+        end
+    end
+
+    if not car then
+        Fluent:Notify({ Title = "Sin Auto", Content = "No se encontró ningún vehículo en el mapa.", Duration = 3 })
+        return
+    end
+
+    local seat = car:FindFirstChildWhichIsA("VehicleSeat", true) or car:FindFirstChildWhichIsA("Seat", true)
+    local root = getRootPart()
+    local hum = getHumanoid()
+    if not root or not hum then return end
+
+    updateStatus("🚨 Rescatando auto del abismo/cielo...")
+
+    local targetPos = (Waypoints and #Waypoints > 0 and Waypoints[1]) or Vector3.new(root.Position.X, 4.0, root.Position.Z)
+    local safeCF = CFrame.new(targetPos.X, math.max(targetPos.Y, 3.5) + 2.5, targetPos.Z)
+
+    -- 1. Detener caídas y limpiar físicas del auto
+    for _, p in ipairs(car:GetDescendants()) do
+        if p:IsA("BasePart") then
+            p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        elseif p:IsA("BodyMover") then
+            p:Destroy()
+        end
+    end
+
+    -- 2. Teletransportar el auto a la superficie
+    pcall(function()
+        car:PivotTo(safeCF)
+    end)
+    task.wait(0.1)
+
+    -- 3. Teletransportar al jugador y sentarlo adentro
+    root.CFrame = safeCF + Vector3.new(0, 3, 0)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+
+    if seat then
+        if seat:IsA("VehicleSeat") then
+            seat.Throttle = 0
+            seat.Steer = 0
+        end
+        task.wait(0.15)
+        pcall(function() seat:Sit(hum) end)
+    end
+
+    resetVehiclePhysics()
+    updateStatus("Auto rescatado y colocado a salvo en el suelo.")
+    Fluent:Notify({ Title = "¡Auto Rescatado!", Content = "El auto volvió a la superficie y está listo.", Duration = 4 })
 end
 
 -- DETECTOR DE DÍA / NOCHE
@@ -111,69 +245,128 @@ task.spawn(function()
     while true do
         task.wait(0.5)
         local isDay, secs = scanGameDayNight()
+        local car = getCurrentVehicle()
+        local modeText = car and "🚗 EN VEHÍCULO (360°)" or "🏃 A PIE"
+
         if Config.IgnoreDayNight then
-            CycleParagraph:SetDesc("Modo: 🏃 A PIE | Ciclo: ☀️ DÍA FORZADO (24h)")
+            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: ☀️ DÍA FORZADO (24h)", modeText))
         else
             local timeInfo = (secs < 900) and string.format(" (Quedan: %ds)", secs) or ""
-            CycleParagraph:SetDesc(string.format("Modo: 🏃 A PIE | Ciclo: %s%s", isDay and "☀️ DÍA" or "🌙 NOCHE", timeInfo))
+            CycleParagraph:SetDesc(string.format("Modo: %s | Ciclo: %s%s", modeText, isDay and "☀️ DÍA" or "🌙 NOCHE", timeInfo))
         end
     end
 end)
 
--- MANIOBRA DE DESATASCO EXCLUSIVA A PIE
+-- MANIOBRAS DE DESATASCO
 local function evasiveManeuver(attempt, targetPos)
     local root = getRootPart()
-    local hum = getHumanoid()
-    if not root or not hum then return end
+    local car, seat = getCurrentVehicle()
+    local controlledPart = seat or root
+    if not controlledPart then return end
 
-    local cf = root.CFrame
-    hum.Jump = true
+    local cf = controlledPart.CFrame
 
-    -- Salto con impulso lateral
-    local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
-    root.AssemblyLinearVelocity = (-cf.LookVector * 25) + (sideDir * 25)
-    task.wait(0.4)
-
-    -- Si se traba más de 3 veces, acomodar posición directamente hacia el punto
-    if attempt >= 4 and targetPos then
-        root.CFrame = CFrame.new(targetPos.X, targetPos.Y + 1.5, targetPos.Z)
-        root.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.2)
+    if car and seat then
+        if attempt == 1 then
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) + (cf.RightVector * 40)
+            task.wait(0.5)
+        elseif attempt == 2 then
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 55) - (cf.RightVector * 40)
+            task.wait(0.5)
+        elseif attempt == 3 then
+            seat.AssemblyLinearVelocity = (-cf.LookVector * 65) + Vector3.new(0, 8, 0)
+            task.wait(0.5)
+        elseif attempt >= 4 and targetPos then
+            updateStatus("⚠️ Traspasando obstáculo hacia el nodo...")
+            seat.AssemblyLinearVelocity = Vector3.zero
+            seat.AssemblyAngularVelocity = Vector3.zero
+            pcall(function()
+                car:PivotTo(CFrame.new(targetPos.X, targetPos.Y + 1.5, targetPos.Z))
+            end)
+            task.wait(0.3)
+        end
+    else
+        local hum = getHumanoid()
+        if hum then
+            hum.Jump = true
+            local sideDir = (attempt % 2 == 1) and cf.RightVector or -cf.RightVector
+            controlledPart.AssemblyLinearVelocity = (-cf.LookVector * 30) + (sideDir * 30)
+            task.wait(0.4)
+            if attempt >= 4 and targetPos and root then
+                root.CFrame = CFrame.new(targetPos.X, targetPos.Y + 2.0, targetPos.Z)
+                root.AssemblyLinearVelocity = Vector3.zero
+            end
+        end
     end
 end
 
--- CAMINAR DIRECTO AL PUNTO (MOVETO)
-local function walkTo(targetPos, maxTime)
+-- ==============================================================================
+-- DESPLAZAMIENTO OMNIDIRECCIONAL EN 360° (AUTO HUNDIDO O A PIE)
+-- ==============================================================================
+local function walkOrDriveTo(targetPos, maxTime)
     local startT = tick()
     local reached = false
 
     while Config.PatrolRunning and (tick() - startT < maxTime) do
         local root = getRootPart()
         local hum = getHumanoid()
+        local car, seat = getCurrentVehicle()
 
         if not root or not hum or hum.Health <= 0 then break end
 
-        -- Distancia horizontal pura (sin contar desniveles de altura)
-        local delta = Vector3.new(targetPos.X - root.Position.X, 0, targetPos.Z - root.Position.Z)
+        -- Punto de referencia: asiento si está dentro del auto, raíz si está a pie
+        local movingPart = seat or root
+        local myPos = movingPart.Position
+
+        -- Vector horizontal puro (360 grados exactos)
+        local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
         local dist = delta.Magnitude
 
-        if dist <= 3.8 then
+        local tolerance = seat and 6.5 or 3.8
+        if dist <= tolerance then
             reached = true
             break
         end
 
-        hum:MoveTo(targetPos)
-        task.wait(0.1)
+        local dir = delta.Unit
+
+        -- CASO 1: DENTRO DEL AUTO (MODO LLANTAS HUNDIDAS / DESPLAZAMIENTO 360°)
+        if seat then
+            -- Orientar suavemente hacia el nodo
+            if dist > 1.2 and car then
+                pcall(function()
+                    local lookTarget = Vector3.new(targetPos.X, myPos.Y, targetPos.Z)
+                    car:PivotTo(CFrame.lookAt(myPos, lookTarget))
+                end)
+            end
+
+            -- Empuje directo horizontal en 360° como si caminara
+            local curVY = seat.AssemblyLinearVelocity.Y
+            if curVY < -25 then curVY = 0 end -- Evitar caer por el mapa
+
+            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, curVY, dir.Z * Config.CarSpeed)
+            seat.AssemblyAngularVelocity = Vector3.zero
+
+            if seat:IsA("VehicleSeat") then
+                seat.Throttle = 1
+            end
+
+        -- CASO 2: A PIE (SIN AUTO)
+        else
+            hum:MoveTo(targetPos)
+        end
+
+        task.wait(0.08)
     end
 
     return reached
 end
 
--- REINTENTOS SI SE QUEDA TRABADO
+-- INTENTAR HASTA 4 VECES CON DESATASCO
 local function moveToPointWithRetry(targetPos)
     for attempt = 1, 4 do
         if not Config.PatrolRunning then return false end
-        local success = walkTo(targetPos, 4.0)
+        local success = walkOrDriveTo(targetPos, 3.8)
         if success then
             return true
         else
@@ -211,7 +404,7 @@ local function redrawAllMarkers()
     end
 end
 
--- DETENER PATRULLAJE
+-- DETENER Y NORMALIZAR TODO
 local function stopPatrol()
     Config.PatrolRunning = false
     if PatrolThread then
@@ -223,10 +416,11 @@ local function stopPatrol()
     local root = getRootPart()
     if hum and root then hum:MoveTo(root.Position) end
 
-    updateStatus("Patrullaje detenido.")
+    resetVehiclePhysics()
+    updateStatus("Patrullaje detenido. Físicas restauradas.")
 end
 
--- INICIAR: VA AL PUNTO 1, ESPERA 5s Y RECORRE A PIE
+-- INICIAR: VA AL PUNTO 1, ESPERA 5s Y RECORRE
 local function startPatrol()
     if #Waypoints < 2 then
         Fluent:Notify({ Title = "Sin Puntos", Content = "Carga o graba puntos primero.", Duration = 3 })
@@ -238,7 +432,7 @@ local function startPatrol()
 
     PatrolThread = task.spawn(function()
         -- 1. Ir al Punto 1 (Base)
-        updateStatus("Iniciando: Caminando al Punto 1...")
+        updateStatus("Iniciando: Yendo al Punto 1...")
         moveToPointWithRetry(Waypoints[1])
 
         if not Config.PatrolRunning then return end
@@ -258,7 +452,7 @@ local function startPatrol()
                 -- Chequeo de Noche (15s antes: Regreso en reversa por la ruta)
                 local isDay, secsLeft = scanGameDayNight()
                 if (not isDay or secsLeft <= Config.ReturnEarlySeconds) and not Config.IgnoreDayNight then
-                    updateStatus(string.format("⚠️ Anocheciendo (%ds): Regresando a pie...", secsLeft))
+                    updateStatus(string.format("⚠️ Anocheciendo (%ds): Regresando a base...", secsLeft))
 
                     for backIdx = i - 1, 1, -1 do
                         if not Config.PatrolRunning then break end
@@ -283,13 +477,13 @@ local function startPatrol()
                 end
 
                 -- Avanzar al siguiente punto
-                updateStatus(string.format("Caminando: Punto [%d / %d]", i, #Waypoints))
+                updateStatus(string.format("Desplazando: Nodo [%d / %d]", i, #Waypoints))
                 moveToPointWithRetry(Waypoints[i])
             end
 
-            -- Al completar toda la ruta, vuelve caminando en reversa al Punto 1
+            -- Al completar toda la ruta, vuelve por los nodos al Punto 1
             if Config.PatrolRunning then
-                updateStatus("Fin de ruta. Regresando a pie a Punto 1...")
+                updateStatus("Fin de ruta. Regresando a Punto 1...")
                 for backIdx = #Waypoints - 1, 1, -1 do
                     if not Config.PatrolRunning then break end
                     moveToPointWithRetry(Waypoints[backIdx])
@@ -301,11 +495,11 @@ local function startPatrol()
 end
 
 -- PESTAÑA 1: PATRULLAJE
-Tabs.Main:AddSection("Control de Ruta a Pie")
+Tabs.Main:AddSection("Control de Ruta")
 
 Tabs.Main:AddButton({
-    Title = "▶ INICIAR PATRULLAJE (A PIE)",
-    Description = "Va a Punto 1, espera 5s y recorre caminando todos los puntos",
+    Title = "▶ INICIAR PATRULLAJE",
+    Description = "Va a Punto 1, espera 5s y recorre todos los puntos en 360°",
     Callback = function()
         startPatrol()
     end
@@ -313,9 +507,17 @@ Tabs.Main:AddButton({
 
 Tabs.Main:AddButton({
     Title = "⏹ DETENER PATRULLAJE",
-    Description = "Frena el movimiento de inmediato",
+    Description = "Cancela todo y normaliza las físicas de inmediato",
     Callback = function()
         stopPatrol()
+    end
+})
+
+Tabs.Main:AddButton({
+    Title = "🔧 DESBUGEAR AUTO (Reset Físicas)",
+    Description = "Frena el auto en seco, elimina fuerzas y asienta el chasis",
+    Callback = function()
+        resetVehiclePhysics()
     end
 })
 
@@ -326,7 +528,34 @@ Tabs.Main:AddToggle("IgnoreDayNightToggle", {
     Callback = function(Value) Config.IgnoreDayNight = Value end
 })
 
--- PESTAÑA 2: GRABADOR
+-- PESTAÑA 2: CONTROL Y RESCATE DE VEHÍCULO
+Tabs.Vehicle:AddSection("Herramientas de Emergencia")
+
+Tabs.Vehicle:AddButton({
+    Title = "🚨 RESCATAR AUTO PERDIDO",
+    Description = "Extrae el auto del abismo/cielo y te sienta adentro",
+    Callback = function()
+        rescueLostCar()
+    end
+})
+
+Tabs.Vehicle:AddButton({
+    Title = "🔧 Desbugear Auto / Frenar en Seco",
+    Callback = function()
+        resetVehiclePhysics()
+    end
+})
+
+Tabs.Vehicle:AddSlider("CarSpeedSlider", {
+    Title = "Velocidad de Desplazamiento 360°",
+    Default = 80,
+    Min = 30,
+    Max = 150,
+    Rounding = 0,
+    Callback = function(Value) Config.CarSpeed = Value end
+})
+
+-- PESTAÑA 3: GRABADOR
 Tabs.Recorder:AddSection("Grabado de Coordenadas")
 
 Tabs.Recorder:AddToggle("AutoRecordToggle", {
@@ -381,7 +610,7 @@ Tabs.Recorder:AddToggle("ShowMarkersToggle", {
     end
 })
 
--- PESTAÑA 3: IMPORTAR / EXPORTAR
+-- PESTAÑA 4: IMPORTAR / EXPORTAR
 Tabs.Port:AddSection("Copia de Seguridad JSON")
 
 Tabs.Port:AddButton({
@@ -436,7 +665,7 @@ Tabs.Port:AddButton({
     end
 })
 
--- PESTAÑA 4: AJUSTES
+-- PESTAÑA 5: AJUSTES
 Tabs.Settings:AddSection("Horarios")
 
 Tabs.Settings:AddSlider("ReturnEarlySlider", {
@@ -497,8 +726,8 @@ task.spawn(function()
 end)
 
 Fluent:Notify({
-    Title = "PATRULLAJE A PIE LISTO",
-    Content = "Modo caminata activo. Sin físicas de vehículo.",
+    Title = "MAP PATROL HUB LISTO",
+    Content = "Modo 360° omnidireccional activo. Compatible con llantas hundidas.",
     Duration = 4
 })
 
