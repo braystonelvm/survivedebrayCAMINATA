@@ -24,8 +24,7 @@ local Config = {
     ShowMarkers = true,
     CarSpeed = 80,
     IgnoreDayNight = false,
-    ReturnEarlySeconds = 15,
-    MoveMode = "1. Zombie Hub (Root Velocity)"
+    ReturnEarlySeconds = 15
 }
 
 local Waypoints = {}
@@ -133,7 +132,7 @@ local function resetVehiclePhysics()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         for _, p in ipairs(lp.Character:GetDescendants()) do
-            if p:IsA("BodyMover") or p:IsA("LinearVelocity") then p:Destroy() end
+            if p:IsA("BodyMover") then p:Destroy() end
         end
     end
 
@@ -167,23 +166,27 @@ local function rescueLostCar()
 
     updateStatus("🚨 Rescatando auto del abismo/cielo...")
 
+    -- Destino seguro: Punto 1 o suelo cercano
     local targetPos = (Waypoints and #Waypoints > 0 and Waypoints[1]) or Vector3.new(root.Position.X, 4.0, root.Position.Z)
     local safeCF = CFrame.new(targetPos.X, math.max(targetPos.Y, 3.5) + 2.5, targetPos.Z)
 
+    -- 1. Detener caídas y limpiar físicas del auto
     for _, p in ipairs(car:GetDescendants()) do
         if p:IsA("BasePart") then
             p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        elseif p:IsA("BodyMover") or p:IsA("LinearVelocity") then
+        elseif p:IsA("BodyMover") then
             p:Destroy()
         end
     end
 
+    -- 2. Teletransportar el auto a la superficie
     pcall(function()
         car:PivotTo(safeCF)
     end)
     task.wait(0.1)
 
+    -- 3. Teletransportar al jugador y sentarlo adentro
     root.CFrame = safeCF + Vector3.new(0, 3, 0)
     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 
@@ -259,6 +262,7 @@ local function evasiveManeuver(attempt, targetPos)
 
     if car and seat then
         if attempt == 1 then
+            -- Intento 1: Retroceso largo a la derecha
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 50) + (cf.RightVector * 35)
             task.wait(0.6)
@@ -266,6 +270,7 @@ local function evasiveManeuver(attempt, targetPos)
             seat.AssemblyLinearVelocity = (cf.RightVector * 40)
             task.wait(0.4)
         elseif attempt == 2 then
+            -- Intento 2: Retroceso largo a la izquierda
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 50) - (cf.RightVector * 35)
             task.wait(0.6)
@@ -273,12 +278,14 @@ local function evasiveManeuver(attempt, targetPos)
             seat.AssemblyLinearVelocity = (-cf.RightVector * 40)
             task.wait(0.4)
         elseif attempt == 3 then
+            -- Intento 3: Reversa pura
             seat.Throttle = -1
             seat.AssemblyLinearVelocity = (-cf.LookVector * 60)
             task.wait(0.7)
             seat.Throttle = 1
             task.wait(0.2)
         elseif attempt >= 4 and targetPos then
+            -- Intento 4: Traspasar pared limpiamente reubicando sobre el punto
             updateStatus("⚠️ Traspasando pared hacia el punto...")
             seat.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             seat.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
@@ -302,13 +309,12 @@ local function evasiveManeuver(attempt, targetPos)
     end
 end
 
--- MOVIMIENTO HACIA UN PUNTO INDIVIDUAL (CON LOS 5 MODOS FÍSICOS)
+-- MOVIMIENTO HACIA UN PUNTO INDIVIDUAL
 local function walkOrDriveTo(targetPos, maxTime)
     local startT = tick()
     local reached = false
 
     while Config.PatrolRunning and (tick() - startT < maxTime) do
-        local dt = RunService.Heartbeat:Wait()
         local root = getRootPart()
         local hum = getHumanoid()
         local car, seat = getCurrentVehicle()
@@ -319,80 +325,26 @@ local function walkOrDriveTo(targetPos, maxTime)
         local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
         local dist = delta.Magnitude
 
-        local tolerance = (car and seat) and 8.0 or 4.5
+        local tolerance = (car and seat) and 9.5 or 5.0
         if dist <= tolerance then
             reached = true
             break
         end
 
-        local dir = delta.Unit
-        local speed = Config.CarSpeed
-        local targetVel = dir * speed
-
         if car and seat then
-            -- MODO 1: ZOMBIE HUB (VELOCIDAD DIRECTA EN ROOT - SIN PIVOTTO)
-            if Config.MoveMode:find("1") then
-                root.AssemblyLinearVelocity = Vector3.new(targetVel.X, root.AssemblyLinearVelocity.Y, targetVel.Z)
-
-            -- MODO 2: VELOCIDAD DIRECTA EN SEAT / RUEDAS
-            elseif Config.MoveMode:find("2") then
-                seat.Throttle = 1
-                seat.AssemblyLinearVelocity = Vector3.new(targetVel.X, seat.AssemblyLinearVelocity.Y, targetVel.Z)
-
-            -- MODO 3: BODYVELOCITY (FUERZA BRUTA HORIZONTAL)
-            elseif Config.MoveMode:find("3") then
-                local bv = seat:FindFirstChild("PatrolBV")
-                if not bv then
-                    bv = Instance.new("BodyVelocity")
-                    bv.Name = "PatrolBV"
-                    bv.MaxForce = Vector3.new(1e8, 0, 1e8)
-                    bv.Parent = seat
-                end
-                bv.Velocity = Vector3.new(targetVel.X, 0, targetVel.Z)
-
-            -- MODO 4: LINEARVELOCITY (CONSTRAINT FÍSICO)
-            elseif Config.MoveMode:find("4") then
-                local att = seat:FindFirstChild("PatrolAtt")
-                if not att then
-                    att = Instance.new("Attachment")
-                    att.Name = "PatrolAtt"
-                    att.Parent = seat
-                end
-                local lv = seat:FindFirstChild("PatrolLV")
-                if not lv then
-                    lv = Instance.new("LinearVelocity")
-                    lv.Name = "PatrolLV"
-                    lv.Attachment0 = att
-                    lv.MaxForce = 1e8
-                    lv.RelativeTo = Enum.ActuatorRelativeTo.World
-                    lv.Parent = seat
-                end
-                lv.VectorVelocity = Vector3.new(targetVel.X, 0, targetVel.Z)
-
-            -- MODO 5: CFRAME STEP (DESPLAZAMIENTO PASO A PASO)
-            elseif Config.MoveMode:find("5") then
-                local moveOffset = dir * math.min(speed * dt, dist)
+            seat.Throttle = 1
+            if delta.Magnitude > 2 then
                 pcall(function()
-                    car:PivotTo(car:GetPivot() + moveOffset)
+                    car:PivotTo(CFrame.new(myPos, Vector3.new(targetPos.X, myPos.Y, targetPos.Z)))
                 end)
             end
+            local dir = delta.Unit
+            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
         else
             hum:MoveTo(targetPos)
         end
-    end
 
-    -- LIMPIEZA DE MOTORES FÍSICOS TEMPORALES AL SALIR DEL NODO
-    local rootPart = getRootPart()
-    local _, seatPart = getCurrentVehicle()
-    for _, part in ipairs({rootPart, seatPart}) do
-        if part then
-            local bv = part:FindFirstChild("PatrolBV")
-            if bv then bv:Destroy() end
-            local lv = part:FindFirstChild("PatrolLV")
-            if lv then lv:Destroy() end
-            local att = part:FindFirstChild("PatrolAtt")
-            if att then att:Destroy() end
-        end
+        task.wait(0.1)
     end
 
     return reached
@@ -532,23 +484,6 @@ end
 
 -- PESTAÑA 1: PATRULLAJE
 Tabs.Main:AddSection("Control de Ruta")
-
-local MoveModeDropdown = Tabs.Main:AddDropdown("MoveModeDropdown", {
-    Title = "Modo de Movimiento",
-    Values = {
-        "1. Zombie Hub (Root Velocity)",
-        "2. Seat Velocity",
-        "3. BodyVelocity",
-        "4. LinearVelocity",
-        "5. CFrame Step"
-    },
-    Multi = false,
-    Default = 1
-})
-
-MoveModeDropdown:OnChanged(function(Value)
-    Config.MoveMode = Value
-end)
 
 Tabs.Main:AddButton({
     Title = "▶ INICIAR PATRULLAJE",
