@@ -24,7 +24,8 @@ local Config = {
     ShowMarkers = true,
     CarSpeed = 80,
     IgnoreDayNight = false,
-    ReturnEarlySeconds = 15
+    ReturnEarlySeconds = 15,
+    MoveMode = "1. Zombie Hub (Root Velocity)"
 }
 
 local Waypoints = {}
@@ -132,14 +133,14 @@ local function resetVehiclePhysics()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
         for _, p in ipairs(lp.Character:GetDescendants()) do
-            if p:IsA("BodyMover") then p:Destroy() end
+            if p:IsA("BodyMover") or p:IsA("LinearVelocity") then p:Destroy() end
         end
     end
 
     Fluent:Notify({ Title = "Auto Normalizado", Content = "Físicas y velocidades reseteadas.", Duration = 2.5 })
 end
 
--- RESCATAR AUTO PERDIDO
+-- RESCATAR AUTO PERDIDO (DEL CIELO O BAJO TIERRA)
 local function rescueLostCar()
     local car = LastKnownCar
     if not car or not car.Parent then
@@ -169,23 +170,20 @@ local function rescueLostCar()
     local targetPos = (Waypoints and #Waypoints > 0 and Waypoints[1]) or Vector3.new(root.Position.X, 4.0, root.Position.Z)
     local safeCF = CFrame.new(targetPos.X, math.max(targetPos.Y, 3.5) + 2.5, targetPos.Z)
 
-    -- 1. Detener caídas y limpiar físicas del auto
     for _, p in ipairs(car:GetDescendants()) do
         if p:IsA("BasePart") then
             p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
             p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        elseif p:IsA("BodyMover") then
+        elseif p:IsA("BodyMover") or p:IsA("LinearVelocity") then
             p:Destroy()
         end
     end
 
-    -- 2. Teletransportar el auto a la superficie
     pcall(function()
         car:PivotTo(safeCF)
     end)
     task.wait(0.1)
 
-    -- 3. Teletransportar al jugador y sentarlo adentro
     root.CFrame = safeCF + Vector3.new(0, 3, 0)
     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
 
@@ -250,7 +248,7 @@ task.spawn(function()
     end
 end)
 
--- MANIOBRAS DE ESCAPE POR FÍSICAS
+-- MANIOBRAS DE ESCAPE POR FÍSICAS (SIN TOCAR COLISIONES DE RUEDAS)
 local function evasiveManeuver(attempt, targetPos)
     local root = getRootPart()
     local car, seat = getCurrentVehicle()
@@ -304,12 +302,13 @@ local function evasiveManeuver(attempt, targetPos)
     end
 end
 
--- MOVIMIENTO HACIA UN PUNTO INDIVIDUAL
+-- MOVIMIENTO HACIA UN PUNTO INDIVIDUAL (CON LOS 5 MODOS FÍSICOS)
 local function walkOrDriveTo(targetPos, maxTime)
     local startT = tick()
     local reached = false
 
     while Config.PatrolRunning and (tick() - startT < maxTime) do
+        local dt = RunService.Heartbeat:Wait()
         local root = getRootPart()
         local hum = getHumanoid()
         local car, seat = getCurrentVehicle()
@@ -320,26 +319,80 @@ local function walkOrDriveTo(targetPos, maxTime)
         local delta = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z)
         local dist = delta.Magnitude
 
-        local tolerance = (car and seat) and 9.5 or 5.0
+        local tolerance = (car and seat) and 8.0 or 4.5
         if dist <= tolerance then
             reached = true
             break
         end
 
+        local dir = delta.Unit
+        local speed = Config.CarSpeed
+        local targetVel = dir * speed
+
         if car and seat then
-            seat.Throttle = 1
-            if delta.Magnitude > 2 then
+            -- MODO 1: ZOMBIE HUB (VELOCIDAD DIRECTA EN ROOT - SIN PIVOTTO)
+            if Config.MoveMode:find("1") then
+                root.AssemblyLinearVelocity = Vector3.new(targetVel.X, root.AssemblyLinearVelocity.Y, targetVel.Z)
+
+            -- MODO 2: VELOCIDAD DIRECTA EN SEAT / RUEDAS
+            elseif Config.MoveMode:find("2") then
+                seat.Throttle = 1
+                seat.AssemblyLinearVelocity = Vector3.new(targetVel.X, seat.AssemblyLinearVelocity.Y, targetVel.Z)
+
+            -- MODO 3: BODYVELOCITY (FUERZA BRUTA HORIZONTAL)
+            elseif Config.MoveMode:find("3") then
+                local bv = seat:FindFirstChild("PatrolBV")
+                if not bv then
+                    bv = Instance.new("BodyVelocity")
+                    bv.Name = "PatrolBV"
+                    bv.MaxForce = Vector3.new(1e8, 0, 1e8)
+                    bv.Parent = seat
+                end
+                bv.Velocity = Vector3.new(targetVel.X, 0, targetVel.Z)
+
+            -- MODO 4: LINEARVELOCITY (CONSTRAINT FÍSICO)
+            elseif Config.MoveMode:find("4") then
+                local att = seat:FindFirstChild("PatrolAtt")
+                if not att then
+                    att = Instance.new("Attachment")
+                    att.Name = "PatrolAtt"
+                    att.Parent = seat
+                end
+                local lv = seat:FindFirstChild("PatrolLV")
+                if not lv then
+                    lv = Instance.new("LinearVelocity")
+                    lv.Name = "PatrolLV"
+                    lv.Attachment0 = att
+                    lv.MaxForce = 1e8
+                    lv.RelativeTo = Enum.ActuatorRelativeTo.World
+                    lv.Parent = seat
+                end
+                lv.VectorVelocity = Vector3.new(targetVel.X, 0, targetVel.Z)
+
+            -- MODO 5: CFRAME STEP (DESPLAZAMIENTO PASO A PASO)
+            elseif Config.MoveMode:find("5") then
+                local moveOffset = dir * math.min(speed * dt, dist)
                 pcall(function()
-                    car:PivotTo(CFrame.new(myPos, Vector3.new(targetPos.X, myPos.Y, targetPos.Z)))
+                    car:PivotTo(car:GetPivot() + moveOffset)
                 end)
             end
-            local dir = delta.Unit
-            seat.AssemblyLinearVelocity = Vector3.new(dir.X * Config.CarSpeed, seat.AssemblyLinearVelocity.Y, dir.Z * Config.CarSpeed)
         else
             hum:MoveTo(targetPos)
         end
+    end
 
-        task.wait(0.1)
+    -- LIMPIEZA DE MOTORES FÍSICOS TEMPORALES AL SALIR DEL NODO
+    local rootPart = getRootPart()
+    local _, seatPart = getCurrentVehicle()
+    for _, part in ipairs({rootPart, seatPart}) do
+        if part then
+            local bv = part:FindFirstChild("PatrolBV")
+            if bv then bv:Destroy() end
+            local lv = part:FindFirstChild("PatrolLV")
+            if lv then lv:Destroy() end
+            local att = part:FindFirstChild("PatrolAtt")
+            if att then att:Destroy() end
+        end
     end
 
     return reached
@@ -479,6 +532,23 @@ end
 
 -- PESTAÑA 1: PATRULLAJE
 Tabs.Main:AddSection("Control de Ruta")
+
+local MoveModeDropdown = Tabs.Main:AddDropdown("MoveModeDropdown", {
+    Title = "Modo de Movimiento",
+    Values = {
+        "1. Zombie Hub (Root Velocity)",
+        "2. Seat Velocity",
+        "3. BodyVelocity",
+        "4. LinearVelocity",
+        "5. CFrame Step"
+    },
+    Multi = false,
+    Default = 1
+})
+
+MoveModeDropdown:OnChanged(function(Value)
+    Config.MoveMode = Value
+end)
 
 Tabs.Main:AddButton({
     Title = "▶ INICIAR PATRULLAJE",
@@ -709,8 +779,8 @@ task.spawn(function()
 end)
 
 Fluent:Notify({
-    Title = "MAP PATROL HUB RESTAURADO",
-    Content = "Script restaurado a su versión estable original sin errores.",
+    Title = "MAP PATROL HUB LISTO",
+    Content = "Sin bugs de suspensión. Rescate de auto y desbugeo activos.",
     Duration = 4
 })
 
